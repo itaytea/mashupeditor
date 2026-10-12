@@ -55,8 +55,7 @@ export default function EqWindow({ engine, autoPlay, onAutoPlay, onClose }) {
   }, [menu]);
 
   return (
-    <Window title="EQUALIZER" className="wa-eq" onClose={onClose}>
-      <div className="wa-eq-tab" aria-hidden="true">EQUALIZER</div>
+    <Window title="EQUALIZER" variant="tab" className="wa-eq" onClose={onClose}>
       <div className="wa-eq-top">
         <Pill variant="dark" on={on} onClick={() => setOn(!on)} title="Equalizer on/off">ON</Pill>
         <Pill variant="dark" on={autoPlay} onClick={onAutoPlay} title="Auto-play drafts when they finish rendering">AUTO</Pill>

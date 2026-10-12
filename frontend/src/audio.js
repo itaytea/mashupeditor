@@ -96,14 +96,14 @@ export function useAudioEngine() {
     }
     if (autoplay) {
       ensureGraph().ctx.resume();
-      el.play().then(() => setStatus("playing")).catch(() => {});
+      el.play().then(() => setStatus("playing")).catch((e) => console.warn("play failed:", e));
     }
   }, [ensureGraph]);
 
   const play = useCallback(() => {
     if (!audio.current.getAttribute("src")) return;
     ensureGraph().ctx.resume();
-    audio.current.play().then(() => setStatus("playing")).catch(() => {});
+    audio.current.play().then(() => setStatus("playing")).catch((e) => console.warn("play failed:", e));
   }, [ensureGraph]);
 
   const pause = useCallback(() => {

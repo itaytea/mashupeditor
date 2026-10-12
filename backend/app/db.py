@@ -50,6 +50,21 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
     PRIMARY KEY (playlist_id, position)
 );
 
+CREATE TABLE IF NOT EXISTS lookups (
+    lookup_key     TEXT PRIMARY KEY,   -- Spotify track id, or normalized "title|artist"
+    status         TEXT NOT NULL,      -- found / not_found
+    bpm            REAL,
+    key_pc         INTEGER,
+    mode           TEXT,
+    key_name       TEXT,
+    camelot        TEXT,
+    source_id      TEXT,
+    matched_title  TEXT,
+    matched_artist TEXT,
+    match_score    REAL,
+    fetched_at     REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id          TEXT PRIMARY KEY,
     kind        TEXT NOT NULL,
@@ -59,6 +74,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     params      TEXT,
     result      TEXT,
     error       TEXT,
+    cancel      INTEGER NOT NULL DEFAULT 0,
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
@@ -83,6 +99,9 @@ def init(path: Path | None = None) -> None:
     config.ensure_dirs()
     _conn = connect(path)
     _conn.executescript(SCHEMA)
+    cols = {r["name"] for r in _conn.execute("PRAGMA table_info(jobs)")}
+    if "cancel" not in cols:  # databases created before cancellation existed
+        _conn.execute("ALTER TABLE jobs ADD COLUMN cancel INTEGER NOT NULL DEFAULT 0")
     # Jobs that were running when the server stopped will never finish.
     now = time.time()
     _conn.execute(
@@ -207,6 +226,32 @@ def get_playlist() -> dict | None:
         r["artists"] = json.loads(r["artists"])
     pl["tracks"] = rows
     return pl
+
+
+# --- lookups ----------------------------------------------------------------
+
+def get_lookups(keys: list[str]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    with cursor() as c:
+        for i in range(0, len(keys), 500):
+            chunk = keys[i:i + 500]
+            c.execute(
+                f"SELECT * FROM lookups WHERE lookup_key IN ({','.join('?' * len(chunk))})",
+                chunk,
+            )
+            out.update({r["lookup_key"]: dict(r) for r in c.fetchall()})
+    return out
+
+
+def save_lookup(rec: dict[str, Any]) -> None:
+    cols = list(rec)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "lookup_key")
+    with cursor() as c:
+        c.execute(
+            f"INSERT INTO lookups ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
+            f"ON CONFLICT(lookup_key) DO UPDATE SET {updates}",
+            [rec[k] for k in cols],
+        )
 
 
 # --- jobs -------------------------------------------------------------------

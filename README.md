@@ -5,6 +5,8 @@ a Spotify playlist URL (used only for track names) and a folder of audio you own
 It matches the two, detects BPM and key, ranks which pairs will mix well, and
 renders a 60-second rough draft: vocals of song A over the instrumental of song B.
 
+Song key and BPM data for tracks you don't own is provided by [GetSongBPM](https://getsongbpm.com).
+
 > **Only audio you own is processed.** Nothing is downloaded from Spotify or
 > anywhere else. The Spotify Web API is used solely to read playlist metadata
 > (titles, artists, durations). All analysis, stem separation and rendering run
@@ -19,7 +21,19 @@ renders a 60-second rough draft: vocals of song A over the instrumental of song 
 | **M1: Analysis** | Scans the folder, reads title/artist from tags (or `Artist - Title` filenames), detects BPM (librosa beat tracker) and key (chroma + Krumhansl-Kessler profiles). Results are cached in SQLite, keyed on path + size + mtime, so rescans only analyse new or changed files. | `app/analysis.py`, `app/db.py` |
 | **M2: Pair ranking** | Scores every pair by key compatibility on the Camelot wheel (same key, ±1, relative major/minor; otherwise the smallest pitch shift that would fix it) and tempo closeness (including half/double time). Gives a ranked list with the reasons. | `app/camelot.py`, `app/tempo.py`, `app/matching.py` |
 | **M3: Draft render** | Demucs (`htdemucs`) splits both songs into vocals and instrumental (cached). A's vocals are time-stretched and pitch-shifted with Rubber Band to fit B, beat-aligned (beat grid, then refined by onset cross-correlation), level-matched and mixed. Exports WAV and MP3. Runs as a background job with progress. | `app/stems.py`, `app/render.py`, `app/jobs.py` |
-| **M4: UI** | Playlist/library view with key and BPM badges, the match list, and a draft player with live job progress and downloads. | `frontend/src/` |
+| **M4: UI** | A Winamp-style skin. The player window plays drafts through Web Audio, with a live spectrum analyser, a 10-band EQ with presets, volume and balance. The playlist window shows Camelot key and BPM for each track. Matches and Drafts are playlist-style windows with live job progress and WAV/MP3 downloads. | `frontend/src/` |
+
+**Key/BPM lookup (optional).** Spotify no longer gives new apps key/BPM data
+(its audio-features endpoint returns 403), so for playlist tracks you *don't*
+own, the app can look the numbers up by title and artist from
+[GetSongBPM](https://getsongbpm.com). Press the magnifier in the playlist
+window. Matches then ranks the whole playlist, marking each track ● (your file,
+analysed locally) or ○ (looked up). You can only render a pair once you have
+both files. Local analysis always wins over looked-up values. The lookup is
+throttled to stay under the free tier's limit (about 3000 requests/hour), so a
+4000-track playlist takes roughly 1.5 hours the first time. It runs on its own
+worker, can be cancelled, and results are cached (misses are retried after 30
+days). The code is in `app/songlookup.py`.
 
 Playlist rows are matched to local files with fuzzy matching (rapidfuzz). Before
 comparing, it strips "feat.", "Remastered 2011", "Radio Edit" and similar suffixes,
@@ -92,11 +106,13 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
    rescans are quick because results are cached.
 2. Paste a playlist URL and click **Load**. Each row shows the local file it
    matched (with a match %) plus Camelot key and BPM badges.
-3. Under **Matches**, switch between pairs from the playlist and pairs from the
-   whole library. Click **Vocals of A over B** (or **Swap**).
-4. The draft renders in the background (Demucs takes roughly 0.5–1× track
-   length on CPU, and stems are cached afterwards). Play it in the Drafts panel
-   or download it as WAV or MP3.
+3. In **Matches**, use **PL** / **LIB** to rank pairs from the playlist or the whole
+   library. Click a track in the playlist to show only pairs that include it.
+   Select a pair and press **A VOX + B INST** (or **B VOX + A INST**).
+4. The draft renders in the background. Demucs takes roughly 0.5–1× track
+   length on CPU, and the stems are cached afterwards. With **AUTO** on in the EQ
+   window, the draft plays in the player as soon as it finishes. Download it
+   from the Drafts window as WAV or MP3.
 
 ## Configuration (`backend/.env`)
 
@@ -106,6 +122,8 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
 | `SPOTIFY_ACCESS_TOKEN` | – | Optional user token (skips Connect Spotify) |
 | `SPOTIFY_REDIRECT_URI` | `http://127.0.0.1:8000/callback` | Must match the dashboard |
 | `MUSIC_DIR` | – | Pre-fills the folder field |
+| `GETSONGBPM_API_KEY` | – | Enables key/BPM lookup for tracks you don't own |
+| `GETSONGBPM_RPS` | `0.8` | Lookup requests per second |
 | `MASHUP_DATA_DIR` | `backend/data` | SQLite DB, stems, drafts |
 | `DEMUCS_MODEL` | `htdemucs` | e.g. `htdemucs_ft` (better, 4× slower) |
 | `DEMUCS_DEVICE` | `cpu` | `cuda` or `mps` if supported |
@@ -118,10 +136,12 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
 | POST | `/api/library/scan` `{folder}` | Starts an analysis job → `{job_id}` |
 | GET | `/api/library` | Analysed tracks |
 | POST/GET | `/api/playlist` `{url}` | Fetch + match / current playlist |
-| GET | `/api/pairs?scope=playlist\|library&limit=100` | Ranked pairs with reasons |
+| GET | `/api/pairs?scope=playlist\|library&limit=100&focus=&owned=` | Ranked pairs with reasons |
 | POST | `/api/drafts` `{vocals_id, instrumental_id, duration?, semitones?, vocal_gain_db?}` | Starts a render job |
 | GET | `/api/drafts`, `/api/drafts/{id}/draft.wav\|mp3` | Finished drafts |
+| POST | `/api/lookup` | Starts the GetSongBPM key/BPM lookup for the playlist |
 | GET | `/api/jobs`, `/api/jobs/{id}` | Job status and progress |
+| POST | `/api/jobs/{id}/cancel` | Cancel a queued or running job |
 
 ## Tests
 

@@ -29,6 +29,13 @@ SPOTIFY_REDIRECT_URI = os.environ.get(
 # Where to send the browser after the Spotify login completes.
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173/")
 
+# GetSongBPM (https://getsongbpm.com/api): key/BPM for playlist tracks you
+# don't have locally. Free key; their terms require a visible backlink.
+GETSONGBPM_API_KEY = os.environ.get("GETSONGBPM_API_KEY", "")
+GETSONGBPM_API = os.environ.get("GETSONGBPM_API", "https://api.getsong.co")
+# Requests per second (the free tier allows roughly 3000 per hour).
+GETSONGBPM_RPS = float(os.environ.get("GETSONGBPM_RPS", "0.8"))
+
 DEMUCS_MODEL = os.environ.get("DEMUCS_MODEL", "htdemucs")
 DEMUCS_DEVICE = os.environ.get("DEMUCS_DEVICE", "cpu")
 

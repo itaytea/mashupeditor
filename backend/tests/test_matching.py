@@ -40,3 +40,58 @@ def test_half_time_pair_ranks_well():
     p = score_pair(track(1, 70, G, "major"), track(2, 140, G, "major"))
     assert p["tempo_ratio"] == 2.0
     assert p["score"] > 0.9
+
+
+def random_tracks(n, seed=0):
+    import random
+
+    rng = random.Random(seed)
+    return [
+        track(i, round(rng.uniform(70, 175), 1), rng.randrange(12), rng.choice(["major", "minor"]))
+        for i in range(n)
+    ]
+
+
+def test_fast_ranking_matches_bruteforce():
+    from app.matching import rank_pairs_bruteforce
+
+    tracks = random_tracks(160)
+    fast = rank_pairs(tracks, limit=200)
+    slow = rank_pairs_bruteforce(tracks, limit=200)
+    assert [p["score"] for p in fast] == [p["score"] for p in slow]
+    assert {(p["a"], p["b"]) for p in fast if p["score"] > slow[-1]["score"]} == \
+        {(p["a"], p["b"]) for p in slow if p["score"] > slow[-1]["score"]}
+
+
+def test_fast_ranking_small_chunks_and_min_score():
+    from app.matching import rank_pairs_bruteforce
+
+    tracks = random_tracks(90, seed=3)
+    fast = rank_pairs(tracks, limit=50, min_score=0.6, chunk=7)
+    slow = rank_pairs_bruteforce(tracks, limit=50, min_score=0.6)
+    assert [p["score"] for p in fast] == [p["score"] for p in slow]
+    assert all(p["score"] >= 0.6 for p in fast)
+
+
+def test_focus_returns_only_pairs_with_that_track_as_a():
+    tracks = random_tracks(60, seed=5)
+    pairs = rank_pairs(tracks, limit=20, focus=7)
+    assert len(pairs) == 20
+    assert all(p["a"] == 7 for p in pairs)
+    assert all(pairs[i]["score"] >= pairs[i + 1]["score"] for i in range(19))
+
+
+def test_string_ids_work():
+    tracks = [dict(track(0, 120, A, "minor"), id="t1"), dict(track(0, 121, C, "major"), id="sXYZ")]
+    (p,) = rank_pairs(tracks)
+    assert {p["a"], p["b"]} == {"t1", "sXYZ"}
+
+
+def test_ranking_thousands_is_fast():
+    import time
+
+    tracks = random_tracks(4000, seed=9)
+    t0 = time.perf_counter()
+    pairs = rank_pairs(tracks, limit=300)
+    assert len(pairs) == 300
+    assert time.perf_counter() - t0 < 10

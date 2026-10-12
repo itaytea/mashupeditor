@@ -11,9 +11,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import analysis, config, db, fuzzy, jobs, matching, render, spotify
+from . import analysis, config, db, fuzzy, jobs, matching, render, songlookup, spotify
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+# httpx logs every request URL at INFO, which would print API keys.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 _state: dict[str, str] = {"music_dir": config.MUSIC_DIR}
 
@@ -64,6 +66,7 @@ def get_config() -> dict:
         "rubberband": config.has_rubberband(),
         "ffmpeg": config.has_ffmpeg(),
         "demucs_model": config.DEMUCS_MODEL,
+        "lookup_configured": bool(config.GETSONGBPM_API_KEY),
     }
 
 
@@ -145,27 +148,91 @@ def get_playlist() -> dict | None:
     if not pl:
         return None
     by_id = {t["id"]: t for t in _library_tracks()}
+    lookups = db.get_lookups([songlookup.lookup_key(r) for r in pl["tracks"]])
     for row in pl["tracks"]:
         row["local"] = by_id.get(row["track_id"]) if row["track_id"] else None
+        hit = lookups.get(songlookup.lookup_key(row))
+        row["lookup"] = hit if hit and hit["status"] == "found" else None
+        row["lookup_status"] = hit["status"] if hit else None
+        row["entity"] = _row_entity(row)
+    pl["lookup_configured"] = bool(config.GETSONGBPM_API_KEY)
     return pl
 
 
 # --- pairs ------------------------------------------------------------------
 
+def _local_entity(t: dict) -> dict:
+    return {
+        "id": f"t{t['id']}", "local_id": t["id"], "source": "analysis",
+        "title": t["title"], "artist": t["artist"], "bpm": t["bpm"],
+        "key_pc": t["key_pc"], "mode": t["mode"], "key_name": t["key_name"],
+        "camelot": t["camelot"],
+    }
+
+
+def _row_entity(row: dict) -> dict | None:
+    """What a playlist row contributes to ranking: your analysed file if you
+    have one, otherwise looked-up key/BPM, otherwise nothing."""
+    local = row.get("local")
+    if local and not local["error"] and local["bpm"]:
+        return _local_entity(local)
+    hit = row.get("lookup")
+    if hit:
+        return {
+            "id": f"s{songlookup.lookup_key(row)}", "local_id": None, "source": "getsongbpm",
+            "title": row["title"], "artist": ", ".join(row["artists"]), "bpm": hit["bpm"],
+            "key_pc": hit["key_pc"], "mode": hit["mode"], "key_name": hit["key_name"],
+            "camelot": hit["camelot"],
+        }
+    return None
+
+
 @app.get("/api/pairs")
-def get_pairs(scope: str = "playlist", limit: int = 100, min_score: float = 0.0) -> dict:
-    """Rank pairs among playlist-matched files (scope=playlist) or the whole
-    analysed library (scope=library)."""
-    tracks = [t for t in _library_tracks() if not t["error"] and t["bpm"]]
+def get_pairs(scope: str = "playlist", limit: int = 100, min_score: float = 0.0,
+              focus: str | None = None, owned: bool = False) -> dict:
+    """Rank pairs across the playlist (your files plus looked-up tracks) or
+    across your whole analysed library. `focus` limits to pairs with one track;
+    `owned` keeps only tracks you have a file for (pairs you can render)."""
     if scope == "playlist":
-        pl = db.get_playlist()
-        ids = {r["track_id"] for r in pl["tracks"] if r["track_id"]} if pl else set()
-        tracks = [t for t in tracks if t["id"] in ids]
-    elif scope != "library":
+        pl = get_playlist()
+        seen: dict[str, dict] = {}
+        for row in pl["tracks"] if pl else []:
+            if row["entity"]:
+                seen.setdefault(row["entity"]["id"], row["entity"])
+        tracks = list(seen.values())
+    elif scope == "library":
+        tracks = [_local_entity(t) for t in _library_tracks() if not t["error"] and t["bpm"]]
+    else:
         raise HTTPException(400, "scope must be 'playlist' or 'library'")
-    by_id = {t["id"]: t for t in tracks}
-    pairs = matching.rank_pairs(tracks, limit=limit, min_score=min_score)
-    return {"tracks": by_id, "pairs": pairs}
+    if owned:
+        tracks = [t for t in tracks if t["local_id"]]
+    pairs = matching.rank_pairs(tracks, limit=min(limit, 1000), min_score=min_score,
+                                focus=focus)
+    ids = {p["a"] for p in pairs} | {p["b"] for p in pairs}
+    by_id = {t["id"]: t for t in tracks if t["id"] in ids or t["id"] == focus}
+    return {"tracks": by_id, "pairs": pairs, "total_tracks": len(tracks)}
+
+
+# --- key/BPM lookup ---------------------------------------------------------
+
+@app.post("/api/lookup")
+def start_lookup() -> dict:
+    if not config.GETSONGBPM_API_KEY:
+        raise HTTPException(
+            400, "Set GETSONGBPM_API_KEY in backend/.env (free key from getsongbpm.com/api), "
+                 "then restart the backend."
+        )
+    pl = db.get_playlist()
+    if not pl:
+        raise HTTPException(400, "Load a Spotify playlist first")
+    running = [j for j in db.list_jobs("lookup", 5) if j["status"] in ("queued", "running")]
+    if running:
+        return {"job_id": running[0]["id"]}
+    rows = pl["tracks"]
+    return {"job_id": jobs.submit(
+        "lookup", {"title": f"Key/BPM lookup: {pl['name']}"},
+        lambda ctx: songlookup.run_lookup(rows, ctx), queue="net",
+    )}
 
 
 # --- drafts -----------------------------------------------------------------
@@ -216,6 +283,11 @@ def draft_file(draft_id: str, filename: str) -> FileResponse:
 @app.get("/api/jobs")
 def list_jobs(kind: str | None = None) -> list[dict]:
     return db.list_jobs(kind)
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict:
+    return {"cancelled": jobs.cancel(job_id)}
 
 
 @app.get("/api/jobs/{job_id}")

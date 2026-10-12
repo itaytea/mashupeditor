@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api.js";
-import { ProgressBar } from "./Badges.jsx";
-import PlaylistView from "./PlaylistView.jsx";
-import MatchList from "./MatchList.jsx";
-import Drafts from "./Drafts.jsx";
+import { api, draftUrl } from "./api.js";
+import { useAudioEngine } from "./audio.js";
+import MainWindow from "./windows/MainWindow.jsx";
+import EqWindow from "./windows/EqWindow.jsx";
+import PlaylistWindow from "./windows/PlaylistWindow.jsx";
+import MatchesWindow from "./windows/MatchesWindow.jsx";
+import DraftsWindow from "./windows/DraftsWindow.jsx";
+import Window from "./skin/Window.jsx";
 
 const ACTIVE = new Set(["queued", "running"]);
 
@@ -13,13 +16,20 @@ export default function App() {
   const [playlistUrl, setPlaylistUrl] = useState("");
   const [library, setLibrary] = useState([]);
   const [playlist, setPlaylist] = useState(null);
+  const [view, setView] = useState("playlist");
   const [jobs, setJobs] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [error, setError] = useState("");
   const [loadingPlaylist, setLoadingPlaylist] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0); // bump to re-rank pairs
-  const [selectedDraft, setSelectedDraft] = useState(null);
+  const [currentDraft, setCurrentDraft] = useState(null);
+  const [selectedTrack, setSelectedTrack] = useState(null);
+  const [showEq, setShowEq] = useState(true);
+  const [showPl, setShowPl] = useState(true);
+  const [autoPlay, setAutoPlay] = useState(true);
+  const [shuffle, setShuffle] = useState(false);
   const finished = useRef(new Set());
+  const engine = useAudioEngine();
 
   const refreshData = useCallback(async () => {
     const [lib, pl, dr] = await Promise.all([api.library(), api.playlist(), api.drafts()]);
@@ -27,6 +37,7 @@ export default function App() {
     setPlaylist(pl);
     setDrafts(dr);
     setRefreshKey((k) => k + 1);
+    return dr;
   }, []);
 
   useEffect(() => {
@@ -44,26 +55,56 @@ export default function App() {
       js.forEach((j) => !ACTIVE.has(j.status) && finished.current.add(j.id));
       setJobs(js);
     });
-    refreshData().catch((e) => setError(e.message));
+    refreshData()
+      .then((dr) => dr[0] && setCurrentDraft(dr[0].draft_id))
+      .catch((e) => setError(e.message));
   }, [refreshData]);
+
+  const draft = drafts.find((d) => d.draft_id === currentDraft) ?? null;
+  const { load } = engine;
+
+  const selectDraft = useCallback(
+    (id, play = false) => {
+      setCurrentDraft(id);
+      const d = drafts.find((x) => x.draft_id === id);
+      if (d) load(draftUrl(d.draft_id, d.mp3 || d.wav), play);
+    },
+    [drafts, load],
+  );
+
+  // Keep the player loaded with the current draft.
+  useEffect(() => {
+    if (draft) load(draftUrl(draft.draft_id, draft.mp3 || draft.wav));
+  }, [draft, load]);
 
   // Poll jobs while any are active; refresh data when one finishes.
   const anyActive = jobs.some((j) => ACTIVE.has(j.status));
   useEffect(() => {
     if (!anyActive) return;
+    let ticks = 0;
     const timer = setInterval(async () => {
       const js = await api.jobs();
       setJobs(js);
+      // A long lookup fills in the playlist as it goes; show results every 15s.
+      if (++ticks % 15 === 0 && js.some((j) => j.kind === "lookup" && j.status === "running")) {
+        refreshData();
+      }
       const newlyDone = js.filter((j) => !ACTIVE.has(j.status) && !finished.current.has(j.id));
       if (newlyDone.length) {
         newlyDone.forEach((j) => finished.current.add(j.id));
-        await refreshData();
-        const draft = newlyDone.find((j) => j.kind === "draft" && j.status === "done");
-        if (draft) setSelectedDraft(draft.result.draft_id);
+        const dr = await refreshData();
+        const done = newlyDone.find((j) => j.kind === "draft" && j.status === "done");
+        if (done) {
+          const d = dr.find((x) => x.draft_id === done.result.draft_id);
+          setCurrentDraft(done.result.draft_id);
+          if (d) load(draftUrl(d.draft_id, d.mp3 || d.wav), autoPlay);
+        }
+        const failed = newlyDone.find((j) => j.status === "failed");
+        if (failed) setError(`${failed.params.title ?? failed.kind}: ${failed.error}`);
       }
     }, 1000);
     return () => clearInterval(timer);
-  }, [anyActive, refreshData]);
+  }, [anyActive, refreshData, load, autoPlay]);
 
   const startJob = async (fn) => {
     setError("");
@@ -75,17 +116,12 @@ export default function App() {
     }
   };
 
-  const scan = (e) => {
-    e.preventDefault();
-    startJob(() => api.scan(folder));
-  };
-
-  const loadPlaylist = async (e) => {
-    e.preventDefault();
+  const loadPlaylist = async () => {
     setError("");
     setLoadingPlaylist(true);
     try {
       setPlaylist(await api.loadPlaylist(playlistUrl));
+      setView("playlist");
       setRefreshKey((k) => k + 1);
     } catch (err) {
       setError(err.message);
@@ -99,103 +135,103 @@ export default function App() {
     setConfig(await api.config());
   };
 
-  const makeDraft = (vocalsId, instrumentalId) =>
-    startJob(() => api.createDraft({ vocals_id: vocalsId, instrumental_id: instrumentalId }));
+  const step = (dir) => {
+    if (!drafts.length) return;
+    const i = drafts.findIndex((d) => d.draft_id === currentDraft);
+    const next = shuffle
+      ? Math.floor(Math.random() * drafts.length)
+      : (Math.max(i, 0) + dir + drafts.length) % drafts.length;
+    selectDraft(drafts[next].draft_id, engine.status === "playing");
+  };
 
   const scanJob = jobs.find((j) => j.kind === "scan" && ACTIVE.has(j.status));
-  const draftJobs = jobs.filter((j) => j.kind === "draft");
+  const lookupJob = jobs.find((j) => j.kind === "lookup" && ACTIVE.has(j.status));
+  const draftJobs = jobs.filter((j) => j.kind === "draft" && j.error !== "server restarted");
+  const activeDraftJob = draftJobs.find((j) => ACTIVE.has(j.status));
+  const trackB = draft ? library.find((t) => t.id === draft.b) : null;
+  const onError = useCallback((m) => setError(m), []);
 
   return (
-    <div className="app">
-      <header>
-        <h1>Mashup Maker</h1>
-        <form onSubmit={scan} className="field">
-          <label htmlFor="folder">Your music folder</label>
-          <div className="row">
-            <input
-              id="folder"
-              value={folder}
-              onChange={(e) => setFolder(e.target.value)}
-              placeholder="/Users/you/Music/stems-ok"
-            />
-            <button disabled={!folder || !!scanJob}>{scanJob ? "Analysing…" : "Analyse"}</button>
-          </div>
-          {scanJob && (
-            <div className="job-inline">
-              <ProgressBar value={scanJob.progress} />
-              <span>{scanJob.message}</span>
-            </div>
-          )}
-        </form>
-        <form onSubmit={loadPlaylist} className="field">
-          <label htmlFor="playlist">Spotify playlist URL</label>
-          <div className="row">
-            <input
-              id="playlist"
-              value={playlistUrl}
-              onChange={(e) => setPlaylistUrl(e.target.value)}
-              placeholder="https://open.spotify.com/playlist/…"
-            />
-            <button disabled={!playlistUrl || loadingPlaylist}>
-              {loadingPlaylist ? "Loading…" : "Load"}
-            </button>
-          </div>
-          {config && !config.spotify_configured && (
-            <p className="hint">Spotify credentials not set — see README. You can still rank your whole library.</p>
-          )}
-          {config?.spotify_configured && (
-            <p className="hint">
-              {config.spotify_connected ? (
-                <>
-                  Connected to Spotify{config.spotify_user ? ` as ${config.spotify_user}` : ""} ·{" "}
-                  <button type="button" className="link" onClick={disconnectSpotify}>
-                    disconnect
-                  </button>
-                </>
-              ) : (
-                <>
-                  Spotify only shares playlist tracks with a logged-in user.{" "}
-                  <a href="/api/spotify/login">Connect Spotify</a>
-                </>
-              )}
-            </p>
-          )}
-        </form>
-      </header>
+    <div className="desktop">
+      <div className="wa-stack">
+        <MainWindow
+          engine={engine}
+          draft={draft}
+          trackB={trackB}
+          activeJob={activeDraftJob}
+          onPrev={() => step(-1)}
+          onNext={() => step(1)}
+          onEject={() => draft && (window.location.href = draftUrl(draft.draft_id, draft.mp3 || draft.wav))}
+          showEq={showEq}
+          showPl={showPl}
+          onToggleEq={() => setShowEq(!showEq)}
+          onTogglePl={() => setShowPl(!showPl)}
+          shuffle={shuffle}
+          onShuffle={() => setShuffle(!shuffle)}
+        />
+        {showEq && (
+          <EqWindow
+            engine={engine}
+            autoPlay={autoPlay}
+            onAutoPlay={() => setAutoPlay(!autoPlay)}
+            onClose={() => setShowEq(false)}
+          />
+        )}
+        {showPl && (
+          <PlaylistWindow
+            config={config}
+            playlist={playlist}
+            library={library}
+            view={playlist ? view : "library"}
+            onView={setView}
+            folder={folder}
+            onFolder={setFolder}
+            onScan={() => folder && startJob(() => api.scan(folder))}
+            scanJob={scanJob}
+            playlistUrl={playlistUrl}
+            onPlaylistUrl={setPlaylistUrl}
+            onLoadPlaylist={loadPlaylist}
+            loadingPlaylist={loadingPlaylist}
+            onDisconnect={disconnectSpotify}
+            selectedTrack={selectedTrack}
+            onSelectTrack={setSelectedTrack}
+            onClose={() => setShowPl(false)}
+            lookupJob={lookupJob}
+            onLookup={() => startJob(api.lookup)}
+            onCancelJob={(id) => startJob(() => api.cancelJob(id))}
+          />
+        )}
+      </div>
+
+      <div className="wa-stack">
+        <MatchesWindow
+          refreshKey={refreshKey}
+          hasPlaylist={!!playlist}
+          selectedTrack={selectedTrack}
+          onClearTrack={() => setSelectedTrack(null)}
+          onDraft={(a, b) => startJob(() => api.createDraft({ vocals_id: a, instrumental_id: b }))}
+          busy={!!activeDraftJob}
+          onError={onError}
+        />
+        <DraftsWindow jobs={draftJobs} drafts={drafts} current={draft} onSelect={selectDraft} />
+        <p className="desktop-note">Only audio files you own are processed. Spotify is used for track names only.</p>
+      </div>
 
       {error && (
-        <div className="error" role="alert">
-          {error} <button className="link" onClick={() => setError("")}>dismiss</button>
+        <div className="wa-dialog-backdrop" role="alertdialog" aria-modal="true" aria-label="Error">
+          <Window title="MASHUP ERROR" className="wa-dialog" onClose={() => setError("")}>
+            <div className="wa-dialog-body">
+              <span className="wa-dialog-icon" aria-hidden="true">!</span>
+              <p>{error}</p>
+            </div>
+            <div className="wa-dialog-actions">
+              <button type="button" className="wa-btn" autoFocus onClick={() => setError("")}>
+                OK
+              </button>
+            </div>
+          </Window>
         </div>
       )}
-      {config && !config.rubberband && (
-        <div className="notice">
-          Rubber Band isn't installed, so drafts use librosa's rougher stretcher. Install it with{" "}
-          <code>brew install rubberband</code> and restart the backend.
-        </div>
-      )}
-
-      <main>
-        <section className="panel playlist-panel">
-          <PlaylistView playlist={playlist} library={library} />
-        </section>
-        <section className="panel matches-panel">
-          <MatchList
-            refreshKey={refreshKey}
-            hasPlaylist={!!playlist}
-            onDraft={makeDraft}
-            busy={draftJobs.some((j) => ACTIVE.has(j.status))}
-          />
-        </section>
-        <section className="panel drafts-panel">
-          <Drafts
-            jobs={draftJobs}
-            drafts={drafts}
-            selected={selectedDraft}
-            onSelect={setSelectedDraft}
-          />
-        </section>
-      </main>
     </div>
   );
 }

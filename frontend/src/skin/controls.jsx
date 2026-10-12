@@ -12,6 +12,8 @@ const ICONS = {
   list: "M4 4h2.5v2.5H4zM8 4.5h8v1.5H8zM4 8.75h2.5v2.5H4zM8 9.25h8v1.5H8zM4 13.5h2.5V16H4zM8 14h8v1.5H8z",
   folder: "M3 5h5l1.5 1.5H17V15H3z",
   download: "M8.5 3h3v6h3L10 14 5.5 9h3zM4 15h12v2H4z",
+  search: "M8.5 3a5.5 5.5 0 014.4 8.8l3.9 3.9-1.6 1.6-3.9-3.9A5.5 5.5 0 118.5 3zm0 2.2a3.3 3.3 0 100 6.6 3.3 3.3 0 000-6.6z",
+  cancel: "M5.6 4L10 8.4 14.4 4 16 5.6 11.6 10 16 14.4 14.4 16 10 11.6 5.6 16 4 14.4 8.4 10 4 5.6z",
   spotify:
     "M10 2.5a7.5 7.5 0 100 15 7.5 7.5 0 000-15zm3.3 10.9a.5.5 0 01-.7.2c-1.9-1.2-4.3-1.4-7.1-.8a.5.5 0 11-.2-1c3-.7 5.7-.4 7.8.9.3.2.4.5.2.7zm1-2.2a.6.6 0 01-.9.2c-2.2-1.3-5.4-1.7-8-.9a.6.6 0 11-.3-1.2c2.9-.9 6.5-.5 9 1 .3.2.4.6.2.9zm.1-2.3C11.8 7.4 7.6 7.2 5.2 8a.7.7 0 11-.4-1.4c2.8-.8 7.4-.7 10.4 1.1a.7.7 0 01-.8 1.2z",
 };
@@ -70,7 +72,9 @@ export function Marquee({ text, width = 31 }) {
 
 const fmt = (s) => {
   if (!Number.isFinite(s) || s < 0) s = 0;
-  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const pad = (n) => String(Math.floor(n)).padStart(2, "0");
+  if (s >= 3600) return `${Math.floor(s / 3600)}:${pad((s % 3600) / 60)}:${pad(s % 60)}`;
+  return `${pad(s / 60)}:${pad(s % 60)}`;
 };
 export const formatTime = fmt;
 
@@ -148,7 +152,7 @@ export function Progress({ value }) {
 /** The playlist-style list body with a striped scrollbar look. */
 export function TrackList({ children, label, empty }) {
   return (
-    <div className="wa-list" role="listbox" aria-label={label} tabIndex={-1}>
+    <div className="wa-list" aria-label={label}>
       {children}
       {empty && <div className="wa-list-empty">{empty}</div>}
     </div>

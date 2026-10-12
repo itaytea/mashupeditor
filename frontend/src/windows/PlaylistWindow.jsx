@@ -1,11 +1,11 @@
 import Window from "../skin/Window.jsx";
 import { ChromeButton, Progress, TrackList, formatTime } from "../skin/controls.jsx";
 
-function Row({ n, text, sub, keyCode, bpm, seconds, dim, selected, onClick, title }) {
+function Row({ n, text, sub, keyCode, bpm, seconds, dim, lookedUp, selected, onClick, title }) {
   return (
     <button
       type="button"
-      className={`wa-row ${dim ? "is-dim" : ""} ${selected ? "is-selected" : ""}`}
+      className={`wa-row ${dim ? "is-dim" : ""} ${lookedUp ? "is-lookup" : ""} ${selected ? "is-selected" : ""}`}
       onClick={onClick}
       title={title}
       aria-pressed={selected}
@@ -24,14 +24,17 @@ function Row({ n, text, sub, keyCode, bpm, seconds, dim, selected, onClick, titl
 export default function PlaylistWindow({
   config, playlist, library, view, onView, folder, onFolder, onScan, scanJob,
   playlistUrl, onPlaylistUrl, onLoadPlaylist, loadingPlaylist, onDisconnect,
-  selectedTrack, onSelectTrack, onClose,
+  selectedTrack, onSelectTrack, onClose, lookupJob, onLookup, onCancelJob,
 }) {
   const showPlaylist = view === "playlist" && playlist;
   const matched = playlist ? playlist.tracks.filter((t) => t.local).length : 0;
+  const lookedUp = playlist ? playlist.tracks.filter((t) => !t.local && t.lookup).length : 0;
+  const busyJob = scanJob ?? lookupJob;
 
   let lcdTop;
   if (scanJob) lcdTop = `SCAN ${Math.round(scanJob.progress * 100)}%`;
-  else if (showPlaylist) lcdTop = `${matched}/${playlist.tracks.length} FOUND`;
+  else if (lookupJob) lcdTop = `LOOKUP ${Math.round(lookupJob.progress * 100)}%`;
+  else if (showPlaylist) lcdTop = `${matched} OWNED ${lookedUp} LOOKED UP`;
   else lcdTop = `${library.length} FILES`;
 
   const totalSecs = showPlaylist
@@ -58,6 +61,16 @@ export default function PlaylistWindow({
             onClick={() => onView(view === "playlist" ? "library" : "playlist")}
             disabled={!playlist}
           />
+          {lookupJob ? (
+            <ChromeButton icon="cancel" label="Stop the key/BPM lookup" onClick={() => onCancelJob(lookupJob.id)} />
+          ) : (
+            <ChromeButton
+              icon="search"
+              label="Look up key/BPM for playlist tracks you don't own"
+              onClick={onLookup}
+              disabled={!playlist}
+            />
+          )}
           {config?.spotify_connected ? (
             <ChromeButton icon="spotify" label="Disconnect Spotify" onClick={onDisconnect} />
           ) : (
@@ -72,10 +85,12 @@ export default function PlaylistWindow({
               <span>{lcdTop}</span>
               <span>{formatTime(totalSecs)}</span>
             </div>
-            {scanJob ? (
-              <Progress value={scanJob.progress} />
+            {busyJob ? (
+              <Progress value={busyJob.progress} />
             ) : (
-              <div className="wa-minilcd-bottom">{showPlaylist ? "PLAYLIST" : "LIBRARY"}</div>
+              <div className="wa-minilcd-bottom">
+                {showPlaylist ? `${playlist.tracks.length} TRACKS` : "LIBRARY"}
+              </div>
             )}
           </div>
           <span className="wa-grip" aria-hidden="true" />
@@ -124,9 +139,15 @@ export default function PlaylistWindow({
           </button>
         </form>
         <div className="wa-source-status">
-          {scanJob ? scanJob.message : spotifyLabel}
-          {config?.spotify_configured && !config.spotify_connected && (
+          {busyJob ? busyJob.message : spotifyLabel}
+          {!busyJob && config?.spotify_configured && !config.spotify_connected && (
             <> · <a href="/api/spotify/login">connect</a></>
+          )}
+          {!busyJob && (
+            <span className="wa-credit">
+              Key/BPM for tracks you don't own:{" "}
+              <a href="https://getsongbpm.com" target="_blank" rel="noreferrer">GetSongBPM</a>
+            </span>
           )}
         </div>
       </div>
@@ -134,24 +155,29 @@ export default function PlaylistWindow({
       {showPlaylist ? (
         <TrackList label={playlist.name}>
           <div className="wa-list-caption">{playlist.name}</div>
-          {playlist.tracks.map((t) => (
-            <Row
-              key={t.position}
-              n={t.position + 1}
-              text={`${t.artists.join(", ")} - ${t.title}`}
-              keyCode={t.local?.camelot}
-              bpm={t.local?.bpm}
-              seconds={(t.duration_ms ?? 0) / 1000}
-              dim={!t.local}
-              selected={!!t.local && t.local.id === selectedTrack}
-              onClick={() => t.local && onSelectTrack(t.local.id === selectedTrack ? null : t.local.id)}
-              title={
-                t.local
-                  ? `${t.local.path}\n${Math.round(t.match_score)}% match · ${t.local.key_name}`
-                  : "No matching local file"
-              }
-            />
-          ))}
+          {playlist.tracks.map((t) => {
+            const e = t.entity;
+            let title;
+            if (t.local) title = `Your file: ${t.local.path}\n${Math.round(t.match_score)}% name match · ${t.local.key_name} (analysed)`;
+            else if (t.lookup) title = `Not owned. Key/BPM from GetSongBPM: ${t.lookup.key_name}, ${t.lookup.bpm} BPM\nMatched "${t.lookup.matched_title}" by ${t.lookup.matched_artist}`;
+            else if (t.lookup_status === "not_found") title = "Not owned, and GetSongBPM has no data for it";
+            else title = "Not owned. Press the magnifier to look up its key/BPM";
+            return (
+              <Row
+                key={t.position}
+                n={t.position + 1}
+                text={`${t.artists.join(", ")} - ${t.title}`}
+                keyCode={e?.camelot}
+                bpm={e?.bpm}
+                seconds={(t.duration_ms ?? 0) / 1000}
+                dim={!t.local}
+                lookedUp={!t.local && !!t.lookup}
+                selected={!!e && e.id === selectedTrack}
+                onClick={() => e && onSelectTrack(e.id === selectedTrack ? null : e.id)}
+                title={title}
+              />
+            );
+          })}
         </TrackList>
       ) : (
         <TrackList
@@ -167,8 +193,8 @@ export default function PlaylistWindow({
               bpm={t.bpm}
               seconds={t.duration}
               dim={!!t.error}
-              selected={t.id === selectedTrack}
-              onClick={() => !t.error && onSelectTrack(t.id === selectedTrack ? null : t.id)}
+              selected={`t${t.id}` === selectedTrack}
+              onClick={() => !t.error && onSelectTrack(`t${t.id}` === selectedTrack ? null : `t${t.id}`)}
               title={t.error ? `Analysis failed: ${t.error}` : `${t.path}\n${t.key_name}`}
             />
           ))}

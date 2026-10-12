@@ -24,7 +24,13 @@ export const api = {
   scan: (folder) => request("POST", "/library/scan", { folder }),
   playlist: () => request("GET", "/playlist"),
   loadPlaylist: (url) => request("POST", "/playlist", { url }),
-  pairs: (scope, limit = 100) => request("GET", `/pairs?scope=${scope}&limit=${limit}`),
+  pairs: (scope, limit = 100, focus = null, owned = false) =>
+    request(
+      "GET",
+      `/pairs?scope=${scope}&limit=${limit}&owned=${owned}${focus ? `&focus=${encodeURIComponent(focus)}` : ""}`,
+    ),
+  lookup: () => request("POST", "/lookup"),
+  cancelJob: (id) => request("POST", `/jobs/${id}/cancel`),
   createDraft: (body) => request("POST", "/drafts", body),
   drafts: () => request("GET", "/drafts"),
   jobs: () => request("GET", "/jobs"),
