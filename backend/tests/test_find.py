@@ -17,6 +17,8 @@ from app.watcher import FolderWatcher
         ("Diva (Lyrics) HD", "Diva"),
         ("Stereo Love (Official Music Video)", "Stereo Love"),
         ("Hello - Lyric Video", "Hello"),
+        ("Illegal (Official Audio)(1)", "Illegal"),
+        ("Like a taxi (HQ instrumental)(1)", "Like a taxi (HQ instrumental)"),
         # real titles that only look noisy stay intact
         ("Video Killed the Radio Star", "Video Killed the Radio Star"),
         ("Audio (Remix)", "Audio (Remix)"),

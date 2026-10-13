@@ -8,7 +8,19 @@ from itertools import combinations
 import numpy as np
 
 from .camelot import score_keys, to_camelot
+import re
+
 from .fuzzy import normalize
+
+# Separators between credited artists. " x " only with spaces around it, so
+# an artist actually named "X" stays an artist.
+_ARTIST_SPLIT = re.compile(
+    r"\s*(?:,|&|/|\s+x\s+|\band\b|\bfeat\.?|\bft\.?|\bwith\b)\s*", re.IGNORECASE
+)
+
+
+def _artist_set(artist: str) -> frozenset[str]:
+    return frozenset(n for n in (normalize(p) for p in _ARTIST_SPLIT.split(artist or "")) if n)
 from .tempo import HALF_DOUBLE_PENALTY, MAX_STRETCH, RATIOS, score_tempos
 
 KEY_WEIGHT = 0.55
@@ -53,17 +65,20 @@ def dedupe(tracks: list[dict]) -> list[dict]:
     """Drop extra copies of the same song (e.g. one file in Music and one in
     Downloads) so a song is never offered as a match for itself. Same song =
     same normalized title, and the same artist or one of them untagged. The
-    first copy wins, so callers should list preferred copies first."""
+    first copy wins, so callers should list preferred copies first.
+
+    Artists count as the same when they share anyone: "David Byrne, Brian Eno"
+    and "David Byrne" are one song; a cover by someone else is not."""
     kept: list[dict] = []
-    seen: dict[str, list[str]] = {}  # title -> artists already kept
+    seen: dict[str, list[frozenset[str]]] = {}  # title -> artist sets already kept
     for t in tracks:
         title = normalize(t.get("title") or "")
-        artist = normalize(t.get("artist") or "")
+        artists = _artist_set(t.get("artist") or "")
         if title:
-            artists = seen.setdefault(title, [])
-            if any(a == artist or not a or not artist for a in artists):
+            known = seen.setdefault(title, [])
+            if any(not k or not artists or k & artists for k in known):
                 continue
-            artists.append(artist)
+            known.append(artists)
         kept.append(t)
     return kept
 

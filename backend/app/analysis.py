@@ -122,7 +122,9 @@ _TRACK_NUMBER = re.compile(r"^\d{1,3}[\s.\-_]+")
 # Junk that downloaded/ripped files carry in their names: "(Official Video)",
 # "[Lyrics]", "HD", a trailing "[11-char video id]", etc.
 _VIDEO_NOISE = re.compile(
-    r"\s*[\(\[](?:[^\)\]]*\b(?:official|lyrics?|visuali[sz]er|audio|video|hd|hq|4k|mv|m/v)\b[^\)\]]*)[\)\]]"
+    # a bracket naming a *version* ("(HQ instrumental)", "[Official Remix]") is kept
+    r"\s*[\(\[](?![^\)\]]*\b(?:instrumental|acapella|a\s?cappella|remix|edit|mix|version|vocals?)\b)"
+    r"(?:[^\)\]]*\b(?:official|lyrics?|visuali[sz]er|audio|video|hd|hq|4k|mv|m/v)\b[^\)\]]*)[\)\]]"
     r"|\s*\[[A-Za-z0-9_-]{11}\]$"
     r"|\s+\b(?:official\s+(?:music\s+)?video|lyric\s+video|hd|hq|4k)\s*$",
     re.IGNORECASE,
@@ -130,9 +132,12 @@ _VIDEO_NOISE = re.compile(
 
 
 def clean_title(text: str) -> str:
+    from .fuzzy import strip_copy_marker
+
+    text = strip_copy_marker(text)  # "Illegal (Official Audio)(1)": copy marker first
     prev = None
     while prev != text:  # several noise chunks can be stacked
-        prev, text = text, _VIDEO_NOISE.sub("", text).strip().rstrip(" -–—|").strip()
+        prev, text = text, strip_copy_marker(_VIDEO_NOISE.sub("", text).strip().rstrip(" -–—|").strip())
     return text
 
 

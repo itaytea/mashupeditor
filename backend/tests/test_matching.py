@@ -1,6 +1,6 @@
 from app.matching import rank_pairs, score_pair
 
-C, G, A, E = 0, 7, 9, 4
+C, G, A, E, B = 0, 7, 9, 4, 11
 
 
 def track(i, bpm, pc, mode):
@@ -122,3 +122,26 @@ def test_unsure_key_counts_for_less_in_both_paths():
     assert any("unsure" in r for r in p_unsure["reasons"])
     tracks = [dict(t, key_confidence=(0.01 if t["id"] % 3 == 0 else 0.4)) for t in random_tracks(120, seed=11)]
     assert [p["score"] for p in rank_pairs(tracks, limit=80)] == [p["score"] for p in rank_pairs_bruteforce(tracks, limit=80)]
+
+
+def test_duplicate_download_is_not_paired_with_original():
+    tracks = [
+        dict(track(1, 120, A, "minor"), title="Illegal", artist="PinkPantheress"),
+        dict(track(2, 120, A, "minor"), title="Illegal(1)", artist="PinkPantheress"),
+        dict(track(3, 121, A, "minor"), title="Ghost(1)", artist=""),
+        dict(track(4, 121, A, "minor"), title="Ghost", artist=""),
+    ]
+    pairs = rank_pairs(tracks)
+    assert [(p["a"], p["b"]) for p in pairs] in ([(1, 3)], [(3, 1)])
+
+
+def test_same_song_with_overlapping_credits_is_one_song():
+    tracks = [
+        dict(track(1, 109, B, "major"), title="Strange Overtones", artist="David Byrne, Brian Eno"),
+        dict(track(2, 109, B, "major"), title="Strange Overtones", artist="David Byrne"),
+        dict(track(3, 109, B, "major"), title="Strange Overtones", artist="Some Cover Band"),  # a cover: keep
+        dict(track(4, 110, B, "major"), title="Other", artist="X feat. Y"),
+        dict(track(5, 110, B, "major"), title="Other", artist="Y"),                          # featured artist: same
+    ]
+    ids = {i for p in rank_pairs(tracks) for i in (p["a"], p["b"])}
+    assert ids == {1, 3, 4}

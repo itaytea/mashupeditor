@@ -21,11 +21,22 @@ _NOISE = [
     r"\[(?:[^\]]*\b(?:remaster(?:ed)?|radio edit|album version|single version|mono|stereo)\b[^\]]*)\]",
 ]
 _NOISE_RE = [re.compile(p, re.IGNORECASE) for p in _NOISE]
+# Copies made by browsers/Finder/Windows: "Song(1)", "Song (2)", "Song copy",
+# "Song - Copy". Stripped so a duplicate download is the same song.
+_COPY_MARKER = re.compile(r"(?:\s?\(\d{1,2}\)|\s+copy(?:\s+\d{1,2})?|\s+-\s+copy)\s*$", re.IGNORECASE)
 _PUNCT = re.compile(r"[^\w\s]")
 _SPACES = re.compile(r"\s+")
 
 
+def strip_copy_marker(text: str) -> str:
+    prev = None
+    while prev != text:  # "Song(1)(1)"
+        prev, text = text, _COPY_MARKER.sub("", text).rstrip()
+    return text
+
+
 def normalize(text: str) -> str:
+    text = strip_copy_marker(text)
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     for rx in _NOISE_RE:

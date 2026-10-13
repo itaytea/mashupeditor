@@ -51,3 +51,15 @@ def test_local_file_by_other_artist_is_not_matched():
     local = [{"id": 1, "title": "Diva", "artist": "Beyoncé"}, {"id": 2, "title": "Diva", "artist": ""}]
     (m,) = match_playlist(playlist, local)
     assert m.track_id == 2  # the untagged file may be it; the Beyoncé one isn't
+
+
+def test_copy_markers_are_the_same_song():
+    from app.fuzzy import strip_copy_marker
+
+    for raw in ("Illegal(1)", "Illegal (2)", "Illegal copy", "Illegal copy 3", "Illegal - Copy", "Illegal(1)(1)"):
+        assert strip_copy_marker(raw) == "Illegal", raw
+        assert normalize(raw) == "illegal"
+    # real titles that end in numbers or "copy" words stay
+    assert normalize("Blink-182") == "blink 182"
+    assert normalize("Carbon Copy Cat") == "carbon copy cat"
+    assert normalize("Track (Pt. 2)") == "track pt 2"
