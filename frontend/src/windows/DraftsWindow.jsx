@@ -51,7 +51,7 @@ export default function DraftsWindow({ jobs, drafts, current, onSelect }) {
             ) : (
               <div className={`wa-minilcd-bottom ${current && syncLabel(current)?.loose ? "is-warn" : ""}`}>
                 {current
-                  ? `${syncLabel(current)?.text ?? "SYNC ?"} ×${current.stretch} ${current.semitones ? `${current.semitones > 0 ? "+" : ""}${current.semitones}ST` : "0ST"}${syncLabel(current)?.loose ? " LOOSE" : ""}`
+                  ? `${syncLabel(current)?.text ?? "SYNC ?"}${current.quantized ? " Q" : ""} ×${current.stretch}${current.phrases ? ` ${current.phrases}PH` : ""}${syncLabel(current)?.loose ? " LOOSE" : ""}`
                   : "NO DRAFT LOADED"}
               </div>
             )}
@@ -91,7 +91,11 @@ export default function DraftsWindow({ jobs, drafts, current, onSelect }) {
             title={[
               `A from ${formatTime(d.start_a)}, B from ${formatTime(d.start_b)}`,
               d.bpm_a_section && `Tempo: A ${d.bpm_a_section} → B ${d.bpm_b_section} BPM (×${d.stretch})`,
+              d.phrases && `${d.phrases} × 8-bar phrases`,
+              d.b_sections?.length && `B: ${d.b_sections.join(" → ")}`,
+              d.a_sections?.length && `A (vocals from): ${d.a_sections.join(" → ")}`,
               d.sync && `Beats wander ${d.sync.wander_ms} ms over the draft (lock ${d.sync.lock})`,
+              d.quantized && `Quantized onto B's grid (without: ${d.sync_unquantized?.wander_ms ?? "?"} ms)`,
               d.key_source && `Key: ${d.key_source}`,
             ].filter(Boolean).join("\n")}
           >

@@ -22,7 +22,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import config, stems, sync
+from . import config, stems, structure, sync
 from .analysis import estimate_key
 from .camelot import key_name, min_shift_to_compatible, score_keys
 from .tempo import score_tempos
@@ -70,6 +70,51 @@ def stretch_and_shift(y: np.ndarray, sr: int, rate: float, semitones: float) -> 
     if semitones:
         out = librosa.effects.pitch_shift(out, sr=sr, n_steps=semitones)
     return out.astype(np.float32)
+
+
+def beat_map(src_beats: np.ndarray, dst_beats: np.ndarray, src_start: float,
+             pre_out: float, n_src: int, sr: int,
+             expected: float | None = None) -> list[tuple[int, int]] | None:
+    """Rubber Band time map sending source beat k to destination beat k.
+
+    `src_beats` are absolute times in the source song, `src_start` is where the
+    cut source segment begins; `dst_beats` are relative to the output start
+    plus `pre_out` seconds of pre-roll. Returns None if the beats disagree too
+    much to warp safely (a tracking glitch would smear the audio).
+    """
+    k = min(src_beats.size, dst_beats.size)
+    if k < 8:
+        return None
+    src = (src_beats[:k] - src_start) * sr
+    dst = (pre_out + dst_beats[:k] - dst_beats[0]) * sr
+    local = np.diff(dst) / np.diff(src)  # per-beat stretch
+    if np.any(local <= 0) or np.max(local) / np.min(local) > 1.35:
+        return None
+    # Both beat lists must be counted at the same level: if they run at
+    # different speeds, beat k of A isn't beat k of B and the warp would smear.
+    if expected and abs(float(np.median(local)) * expected - 1.0) > 0.06:
+        return None
+    rate_end = float(np.median(local))
+    pairs = [(0, 0)]
+    for a, b in zip(src, dst):
+        a, b = int(round(a)), int(round(b))
+        if pairs[-1][0] < a < n_src and b > pairs[-1][1]:
+            pairs.append((a, b))
+    tail = n_src - pairs[-1][0]
+    if tail > 0:
+        pairs.append((n_src, pairs[-1][1] + int(round(tail * rate_end))))
+    return pairs
+
+
+def quantize_stretch(y: np.ndarray, sr: int, time_map: list[tuple[int, int]],
+                     semitones: float) -> np.ndarray:
+    """Warp `y` (channels, samples) along `time_map` so every beat lands on
+    the grid, optionally pitch-shifting in the same pass."""
+    import pyrubberband as pyrb
+
+    rbargs = {"--formant": "", "--pitch": semitones} if semitones else {}
+    out = pyrb.timemap_stretch(y.T, sr, time_map, rbargs=rbargs)
+    return np.asarray(out, dtype=np.float32).reshape(-1, y.shape[0]).T
 
 
 def beat_times(y_mono: np.ndarray, sr: int, bpm_hint: float | None) -> np.ndarray:
@@ -148,6 +193,7 @@ def fade(y: np.ndarray, sr: int, fade_in: float, fade_out: float) -> np.ndarray:
 
 TEMPO_SR = 22050
 MIN_KEY_CONFIDENCE = 0.05
+LOOSE_MS = 40.0  # beat wander above which "auto" quantize kicks in
 
 
 def to_mono22(y: np.ndarray, sr: int) -> np.ndarray:
@@ -273,14 +319,64 @@ def choose_section(
     return best
 
 
+def choose_phrase_window(struct: dict, duration: float, total: float) -> dict | None:
+    """A run of whole 8-bar phrases for B: as close to `duration` as phrases
+    allow, preferring windows with a drop (or a build into one) and avoiding
+    intros/outros."""
+    phrases, plen = struct.get("phrases") or [], struct.get("phrase_seconds")
+    if not phrases or not plen:
+        return None
+    n = max(1, min(len(phrases), int(round(duration / plen))))
+    top = max(p["energy"] for p in phrases) or 1.0
+    best = None
+    for i in range(len(phrases) - n + 1):
+        win = phrases[i:i + n]
+        if win[-1]["end"] > total:
+            continue
+        labels = [p["label"] for p in win]
+        score = float(np.mean([p["energy"] for p in win])) / top
+        if "drop" in labels:
+            score *= 1.25
+        if labels[0] in ("build", "drop"):
+            score *= 1.1
+        if labels[0] == "intro" or "outro" in labels:
+            score *= 0.6
+        if best is None or score > best["score"]:
+            best = {"score": score, "start": win[0]["start"], "labels": labels,
+                    "duration": win[-1]["end"] - win[0]["start"], "phrases": n}
+    return best
+
+
+def phrase_candidates(struct: dict, src_len: float, total: float, margin: float,
+                      keep: int = 10) -> list[tuple[float, float]]:
+    """Phrase starts in A ranked by how much singing follows them."""
+    phrases = struct.get("phrases") or []
+    out = []
+    for i, p in enumerate(phrases):
+        if p["start"] < margin or p["start"] + src_len > total - margin:
+            continue
+        covered = [q for q in phrases[i:] if q["start"] < p["start"] + src_len]
+        out.append((p["start"], float(np.mean([q.get("vocal", 0.0) for q in covered]))))
+    out.sort(key=lambda x: -x[1])
+    return out[:keep]
+
+
+def labels_between(struct: dict, start: float, end: float) -> list[str]:
+    return [p["label"] for p in struct.get("phrases") or []
+            if p["end"] > start + 0.5 and p["start"] < end - 0.5]
+
+
 # --- main entry --------------------------------------------------------------
 
 def render_draft(
     track_a: dict, track_b: dict, *, duration: float = 60.0,
     semitones: int | None = None, vocal_gain_db: float = 0.0,
-    progress: ProgressFn | None = None,
+    quantize: str = "auto", progress: ProgressFn | None = None,
 ) -> dict:
-    """Vocals of `track_a` over the instrumental of `track_b`."""
+    """Vocals of `track_a` over the instrumental of `track_b`.
+
+    `quantize`: "auto" warps A beat-by-beat onto B's grid when a constant
+    stretch leaves the beats loose; "on" always does; "off" never does."""
     import soundfile as sf
 
     report = progress or (lambda f, m: None)
@@ -300,31 +396,50 @@ def render_draft(
     total_a, total_b = inst_a.shape[1] / sr, inst_b.shape[1] / sr
     duration = min(duration, total_b)
     inst_a22, vox_a22, inst_b22 = to_mono22(inst_a, sr), to_mono22(vox_a, sr), to_mono22(inst_b, sr)
-    beats_a = beat_times(inst_a22, TEMPO_SR, track_a["bpm"])
-    beats_b = beat_times(inst_b22, TEMPO_SR, track_b["bpm"])
+    report(0.83, "Finding downbeats and 8-bar phrases")
+    # Decide each song's real beat level once (not a 2/3 misread) and use it
+    # for the phrase grid, the lock and quantizing alike.
+    level_b = sync.main_level(inst_b22) or track_b["bpm"]
+    level_a = sync.main_level(inst_a22) or track_a["bpm"]
+    struct_b = structure.analyze(inst_b22, level_b)
+    struct_a = structure.analyze(inst_a22, level_a, extra_energy=vox_a22)
+    beats_a = struct_a["beats"] if struct_a["beats"].size else beat_times(inst_a22, TEMPO_SR, track_a["bpm"])
+    beats_b = struct_b["beats"] if struct_b["beats"].size else beat_times(inst_b22, TEMPO_SR, track_b["bpm"])
 
-    # B is the reference: its steadiest, most energetic section.
-    sec_b = choose_section(inst_b22, inst_b22, beats_b, duration, None, keep=8)
-    start_b = sec_b["anchor"]
+    # B is the reference: whole phrases, ideally with a build/drop, starting on
+    # a phrase boundary. Falls back to the steadiest loud section.
+    win_b = choose_phrase_window(struct_b, duration, total_b)
+    if win_b:
+        start_b, duration = win_b["start"], min(win_b["duration"], total_b - win_b["start"])
+    else:
+        start_b = choose_section(inst_b22, inst_b22, beats_b, duration, None, keep=8)["anchor"]
     b0f = int(start_b * TEMPO_SR)
     env_b = sync.onset_env(inst_b22[b0f:b0f + int(duration * TEMPO_SR)])
-    levels_b = sync.tempo_levels(env_b)
-    bpm_b = levels_b[0] if levels_b else (sec_b["bpm"] or track_b["bpm"])
+    levels_b = sync.tempo_levels(sync.full_band_env(inst_b22[b0f:b0f + int(duration * TEMPO_SR)]))
+    # B's beat in this window: its main level, refined by the section's own peaks.
+    bpm_b = min(levels_b, key=lambda l: abs(l / level_b - 1)) if levels_b else level_b
+    if abs(bpm_b / level_b - 1) > 0.04:
+        bpm_b = struct_b["bpm"] or level_b
 
     # A: try its vocal-heavy sections and keep the one whose drums actually
     # lock onto B's once stretched (measured, not guessed from BPM numbers).
     report(0.84, "Locking A's rhythm onto B")
     pad_s = 2.0  # extra source audio so alignment shifts never run dry
     src_len = duration * sync.MAX_RATE + 1.0
-    energy_a, edt = rms_curve(vox_a22, TEMPO_SR)
-    cands = _candidates(beats_a, energy_a, edt, min(src_len, total_a - 2 * pad_s),
-                        total_a, pad_s, keep=10)
-    top_e = max(e for _, e in cands) or 1.0
+    # Candidates start on A's phrase boundaries (so A's phrase lines up with
+    # B's); without a phrase grid, fall back to bar-aligned loud spots.
+    cands = phrase_candidates(struct_a, min(src_len, total_a - 2 * pad_s), total_a, pad_s)
+    if not cands:
+        energy_a, edt = rms_curve(vox_a22, TEMPO_SR)
+        cands = _candidates(beats_a, energy_a, edt, min(src_len, total_a - 2 * pad_s),
+                            total_a, pad_s, keep=10)
+    top_e = max((e for _, e in cands), default=0.0) or 1.0
     lock = None
     for start, e in cands:
         a0f = int(start * TEMPO_SR)
         env_a = sync.onset_env(inst_a22[a0f:a0f + int(src_len * TEMPO_SR)])
-        res = sync.best_rate(env_a, env_b, sync.tempo_levels(env_a), levels_b, bpm_b)
+        levels_a = sync.tempo_levels(sync.full_band_env(inst_a22[a0f:a0f + int(src_len * TEMPO_SR)]))
+        res = sync.best_rate(env_a, env_b, levels_a, levels_b, bpm_b)
         if res is None:
             continue
         res["start"], res["energy"] = start, e
@@ -390,10 +505,60 @@ def render_draft(
     vox = place(vox, offset, n_out)
 
     # 5. independent check on the rendered audio: do A's hits stay on B's?
-    check = sync.drift_report(to_mono22(place(inst_a_st, offset, n_out), sr),
-                              to_mono22(bed, sr), bpm_b)
+    bed22 = to_mono22(bed, sr)
+    check = sync.drift_report(to_mono22(place(inst_a_st, offset, n_out), sr), bed22, bpm_b)
 
-    # 6. mix
+    # 6. quantize: if one constant stretch leaves A's beats loose (live drums,
+    # tempo drift, swing), warp A beat-by-beat onto B's actual beats instead.
+    quantized, check_constant = False, None
+    loose = check is None or check["wander_ms"] > LOOSE_MS
+    if quantize == "on" or (quantize == "auto" and loose):
+        if config.has_rubberband():
+            report(0.93, "Quantizing A onto B's beat grid")
+            seg_start = a0 / sr
+            dst_beats = structure.track_beats(bed22, bpm_b)
+
+            def attempt(src_beats: np.ndarray, rate_q: float, end: int):
+                """Warp A onto B along matched beats; returns (check, tmap, offset, end)."""
+                src_beats = src_beats[src_beats >= start_a - 0.05]
+                if not (src_beats.size and dst_beats.size):
+                    return None
+                pre_out = (src_beats[0] - seg_start) / rate_q
+                tmap = beat_map(src_beats, dst_beats, seg_start, pre_out, end - a0, sr, expected=rate_q)
+                if not tmap:
+                    return None
+                q_off = int((dst_beats[0] - pre_out) * sr)
+                inst_q = place(quantize_stretch(inst_a[:, a0:end].mean(0, keepdims=True), sr, tmap, 0), q_off, n_out)
+                chk = sync.drift_report(to_mono22(inst_q, sr), bed22, bpm_b)
+                return (chk, tmap, q_off, end) if chk else None
+
+            # Follow A's real beats. Free tracking keeps its drift but may count
+            # a different beat level; the level-guided pass forces the lock's
+            # level (low tightness, so beats can still drift). If A's own count
+            # disagrees with the lock, also try quantizing at A's counted level:
+            # a bigger stretch, but every beat lands on B's grid. Keep the best.
+            seg22 = inst_a22[int(seg_start * TEMPO_SR):int(a1 / sr * TEMPO_SR)]
+            results = []
+            free = seg_start + structure.track_beats(seg22, bpm_a)
+            for src in (free, seg_start + structure.track_beats(seg22, bpm_a, fixed=True, tightness=100)):
+                results.append(attempt(src, rate, a1))
+            if free.size > 8 and dst_beats.size > 8:
+                own_rate = float(np.median(np.diff(free)) / np.median(np.diff(dst_beats)))
+                if abs(own_rate / rate - 1) > 0.06 and sync.MIN_RATE <= own_rate <= sync.MAX_RATE:
+                    end = int(min(total_a, start_a + duration * own_rate + pad_s) * sr)
+                    seg_long = inst_a22[int(seg_start * TEMPO_SR):int(end / sr * TEMPO_SR)]
+                    own = seg_start + structure.track_beats(seg_long, 60 / np.median(np.diff(free)))
+                    results.append(attempt(own, own_rate, end))
+            results = [r for r in results if r]
+            best_q = min(results, key=lambda r: r[0]["wander_ms"]) if results else None
+            if best_q:
+                check_q, tmap, q_off, end = best_q
+                better = check is None or check_q["wander_ms"] < check["wander_ms"]
+                if quantize == "on" or better:
+                    vox = place(quantize_stretch(vox_a[:, a0:end], sr, tmap, semitones), q_off, n_out)
+                    quantized, check_constant, check = True, check, check_q
+
+    # 7. mix
     report(0.95, "Mixing")
     gain = active_rms(bed) / active_rms(vox) * 10 ** (vocal_gain_db / 20)
     gain = float(min(gain, 8.0))  # don't blow up near-silent vocal stems
@@ -435,6 +600,11 @@ def render_draft(
         "bpm_b_section": round(bpm_b, 2),
         "lock": round(lock.get("consistency", 0.0), 3),
         "sync": check,  # {offset_ms, wander_ms, lock, corr} on the final audio
+        "quantized": quantized,
+        "sync_unquantized": check_constant,
+        "phrases": win_b["phrases"] if win_b else None,
+        "b_sections": labels_between(struct_b, start_b, start_b + duration),
+        "a_sections": labels_between(struct_a, start_a, start_a + duration * rate),
         "key_source": key_source,
         "engine": "rubberband" if config.has_rubberband() else "librosa",
         "wav": wav_path.name,

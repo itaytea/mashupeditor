@@ -73,8 +73,7 @@ def precise_bpm(percussive: np.ndarray, sr: int) -> float:
     from . import sync
 
     env = librosa.onset.onset_strength(y=percussive, sr=sr, hop_length=sync.HOP)
-    levels = sync.tempo_levels(env) if sr == sync.SR else []
-    start = levels[0] if levels else None
+    start = sync.main_level(percussive) if sr == sync.SR else None
     tempo, beats = librosa.beat.beat_track(
         onset_envelope=env, sr=sr, hop_length=sync.HOP, units="time",
         **({"start_bpm": start, "tightness": 300} if start else {}),

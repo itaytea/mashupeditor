@@ -49,6 +49,18 @@ cleaned before matching. Select a track you don't own and press ▶ (or use the
 ▶ buttons in Matches) to search YouTube for it. The code is in
 `app/analysis.py` (`find_in_folder`) and `app/watcher.py`.
 
+**Phrases and quantize.** Before rendering, both songs get a beat grid, downbeats
+(the "1" of each bar, found from kicks and chord changes) and 8-bar phrases (the
+bar where the music changes most), each labelled intro / build / drop /
+breakdown / outro by energy. B's window is a run of whole phrases, preferring
+one with a drop or a build into one. A's vocals start on one of A's phrase
+boundaries, so the two songs' phrases line up. If one constant stretch leaves
+A's beats drifting against B's (over 40 ms), **QUANT AUTO** warps A beat by beat
+onto B's actual beats with Rubber Band, and keeps that only if it measures
+tighter. Beats are placed using a kick-weighted onset envelope (off-beat
+hi-hats otherwise pull trackers half a beat off), and the tempo is counted from
+the full-band one. The code is in `app/structure.py`, `app/sync.py` and `app/render.py`.
+
 Playlist rows are matched to local files with fuzzy matching (rapidfuzz). Before
 comparing, it strips "feat.", "Remastered 2011", "Radio Edit" and similar suffixes,
 then assigns matches one-to-one from best score down (`app/fuzzy.py`).
@@ -75,13 +87,18 @@ Work in progress. What works and what doesn't yet:
 - Pair ranking over thousands of tracks; duplicate copies of a song are never paired
 - Draft rendering that measures tempo per section and locks A's rhythm onto B's,
   with a sync rating (ms of drift) on every draft
+- Downbeats and 8-bar phrases with intro / build / drop / breakdown / outro labels;
+  drafts start on a phrase boundary and are cut to whole phrases
+- Quantize (AUTO / ON / OFF): warps a loose song beat-by-beat onto the other's grid
 - FIND/WATCH folder matching, YouTube search links, a JOBS view with cancel
 
 **Known issues / not done yet**
 - Key detection is weak on dense or electronic mixes. When it's unsure, drafts are
   left unshifted, so vocals can clash harmonically
-- Drafts are rough: one fixed 60-second window, no downbeat detection (bars are
-  assumed to be every 4 beats), basic level balancing, no EQ or effects
+- Drafts are rough: one window of whole phrases, basic level balancing, no EQ or effects
+- Section labels are energy heuristics; they assume 4/4 and 8-bar phrasing
+- Songs whose beat level is ambiguous (the tracker can't settle on one tempo) can't be
+  quantized; those drafts are flagged LOOSE instead of being warped
 - Songs that change tempo work only if one of their sections locks onto the other song
 - Spotify's development mode may refuse playlists you don't own
 - Single-user and local only: no auth, no packaging, and the UI is desktop-first
@@ -173,7 +190,7 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
 | GET | `/api/library` | Analysed tracks |
 | POST/GET | `/api/playlist` `{url}` | Fetch + match / current playlist |
 | GET | `/api/pairs?scope=playlist\|library&limit=100&focus=&owned=` | Ranked pairs with reasons |
-| POST | `/api/drafts` `{vocals_id, instrumental_id, duration?, semitones?, vocal_gain_db?}` | Starts a render job |
+| POST | `/api/drafts` `{vocals_id, instrumental_id, duration?, semitones?, vocal_gain_db?, quantize?}` | Starts a render job (`quantize`: auto/on/off) |
 | GET | `/api/drafts`, `/api/drafts/{id}/draft.wav\|mp3` | Finished drafts |
 | POST | `/api/find` `{folder, watch?}` | Look for unowned playlist tracks in a folder |
 | POST | `/api/find/watch` `{watch}` | Toggle watching the FIND folder |

@@ -22,9 +22,18 @@ MIN_RATE, MAX_RATE = 0.84, 1.19  # beyond this stretching sounds obviously proce
 
 
 def onset_env(y: np.ndarray) -> np.ndarray:
+    """Onset strength with kicks/bass weighted up. Full-band onsets are
+    dominated by hi-hats, which in dance music sit *between* the beats, so a
+    plain envelope lets trackers (and our lock) settle half a beat off."""
     import librosa
 
-    env = librosa.onset.onset_strength(y=y, sr=SR, hop_length=HOP)
+    mel = librosa.feature.melspectrogram(y=y, sr=SR, hop_length=HOP, n_mels=64)
+    full = librosa.onset.onset_strength(S=librosa.power_to_db(mel), sr=SR, hop_length=HOP)
+    # Low band (< ~300 Hz) on linear amplitude, not dB: a kick on top of a
+    # sustained bassline is a big energy jump but a small dB one, while a
+    # hi-hat's faint low rumble is a big dB jump from near-silence.
+    low = librosa.onset.onset_strength(S=np.sqrt(mel[:8]), sr=SR, hop_length=HOP)
+    env = full / (full.max() or 1.0) + 1.5 * low / (low.max() or 1.0)
     return env.astype(np.float64)
 
 
@@ -44,6 +53,46 @@ def tempo_levels(env: np.ndarray, keep: int = 3) -> list[float]:
     peaks.sort(key=lambda i: -prof[i])
     top = prof[peaks[0]]
     return [float(bpms[i]) for i in peaks[:keep] if prof[i] >= 0.35 * top]
+
+
+def full_band_env(y: np.ndarray) -> np.ndarray:
+    """Plain onset strength. Hats and percussion spell out the real pulse, so
+    this is the envelope to *count the tempo* from; the kick-weighted one
+    (onset_env) is for *placing* beats, where off-beat hats mislead."""
+    import librosa
+
+    return librosa.onset.onset_strength(y=y, sr=SR, hop_length=HOP).astype(np.float64)
+
+
+def main_level(y: np.ndarray) -> float | None:
+    """The beat level a listener would tap, for a mono SR signal: the strongest
+    full-band tempo peak, nudged towards usual dance/pop tempos and towards
+    levels with support at half or double speed (a tiebreaker only: syncopated
+    kicks make "2/3" readings like 110 for a 166 BPM track look strong)."""
+    import librosa
+
+    env = full_band_env(y)
+    if env.size < 64 or not np.any(env):
+        return None
+    tg = librosa.feature.tempogram(onset_envelope=env, sr=SR, hop_length=HOP)
+    bpms = librosa.tempo_frequencies(tg.shape[0], sr=SR, hop_length=HOP)
+    prof = tg.mean(axis=1)
+    valid = np.isfinite(bpms) & (bpms > 0)
+    order = np.argsort(bpms[valid])
+    xs, ys = bpms[valid][order], prof[valid][order]
+
+    def at(bpm: float) -> float:
+        return float(np.interp(bpm, xs, ys, left=0.0, right=0.0))
+
+    best, best_score = None, -1.0
+    for level in tempo_levels(env, keep=4):
+        support = max(at(level / 2), at(level * 2))
+        score = at(level) + 0.3 * support
+        if 70 <= level <= 190:
+            score *= 1.1  # where people actually count dance/pop tempos
+        if score > best_score:
+            best, best_score = level, score
+    return best
 
 
 def warp(env: np.ndarray, rate: float, n: int) -> np.ndarray:
@@ -116,9 +165,10 @@ def candidate_rates(levels_a: list[float], levels_b: list[float]) -> list[float]
 
 
 def best_rate(env_a: np.ndarray, env_b: np.ndarray, levels_a: list[float],
-              levels_b: list[float], bpm_b_hint: float) -> dict | None:
-    """Try every plausible rate, keep the best lock, then remove residual drift."""
-    beat_frames = 60.0 / (levels_b[0] if levels_b else bpm_b_hint) / DT
+              levels_b: list[float], bpm_b: float) -> dict | None:
+    """Try every plausible rate, keep the best lock, then remove residual drift.
+    `bpm_b` is B's beat level (see main_level); lock is judged on that beat."""
+    beat_frames = 60.0 / bpm_b / DT
     best = None
     for r in candidate_rates(levels_a, levels_b):
         ev = evaluate(env_a, env_b, r, beat_frames)

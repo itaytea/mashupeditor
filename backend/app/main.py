@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException
@@ -301,6 +302,7 @@ class DraftRequest(BaseModel):
     duration: float = Field(60.0, ge=10, le=180)
     semitones: int | None = Field(None, ge=-6, le=6)
     vocal_gain_db: float = Field(0.0, ge=-12, le=12)
+    quantize: Literal["auto", "on", "off"] = "auto"
 
 
 @app.post("/api/drafts")
@@ -312,7 +314,7 @@ def create_draft(req: DraftRequest) -> dict:
     def work(ctx: jobs.JobContext) -> dict:
         return render.render_draft(
             a, b, duration=req.duration, semitones=req.semitones,
-            vocal_gain_db=req.vocal_gain_db, progress=ctx.progress,
+            vocal_gain_db=req.vocal_gain_db, quantize=req.quantize, progress=ctx.progress,
         )
 
     params = req.model_dump() | {"title": f"{a['title']} × {b['title']}"}

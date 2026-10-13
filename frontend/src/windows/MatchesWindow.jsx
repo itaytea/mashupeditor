@@ -13,6 +13,7 @@ export default function MatchesWindow({
   const [ownedOnly, setOwnedOnly] = useState(false);
   const [data, setData] = useState({ tracks: {}, pairs: [], total_tracks: 0 });
   const [selected, setSelected] = useState(null);
+  const [quantize, setQuantize] = useState("auto"); // auto | on | off
 
   useEffect(() => setScope(hasPlaylist ? "playlist" : "library"), [hasPlaylist]);
 
@@ -149,10 +150,21 @@ export default function MatchesWindow({
               </a>
             ))}
             <span className="wa-spacer" />
+            <Pill
+              on={quantize !== "off"}
+              onClick={() => setQuantize({ auto: "on", on: "off", off: "auto" }[quantize])}
+              title={{
+                auto: "QUANT AUTO: if A's beats drift against B's, warp A beat-by-beat onto B's grid",
+                on: "QUANT ON: always warp A beat-by-beat onto B's grid",
+                off: "QUANT OFF: one constant stretch only",
+              }[quantize]}
+            >
+              Q:{quantize.toUpperCase()}
+            </Pill>
             <button
               type="button" className="wa-btn"
               disabled={busy || missing.length > 0}
-              onClick={() => onDraft(a.local_id, b.local_id)}
+              onClick={() => onDraft(a.local_id, b.local_id, quantize)}
               title={busy ? "A draft is rendering; see JOBS" : missing.length ? "You need both files" : undefined}
             >
               {busy ? "RENDERING…" : "A VOX + B INST"}
@@ -160,7 +172,7 @@ export default function MatchesWindow({
             <button
               type="button" className="wa-btn"
               disabled={busy || missing.length > 0}
-              onClick={() => onDraft(b.local_id, a.local_id)}
+              onClick={() => onDraft(b.local_id, a.local_id, quantize)}
               title={busy ? "A draft is rendering; see JOBS" : missing.length ? "You need both files" : undefined}
             >
               {busy ? "RENDERING…" : "B VOX + A INST"}

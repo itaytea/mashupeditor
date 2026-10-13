@@ -218,7 +218,9 @@ export default function App() {
           hasPlaylist={!!playlist}
           selectedTrack={selectedTrack}
           onClearTrack={() => setSelectedTrack(null)}
-          onDraft={(a, b) => startJob(() => api.createDraft({ vocals_id: a, instrumental_id: b }))}
+          onDraft={(a, b, quantize) =>
+            startJob(() => api.createDraft({ vocals_id: a, instrumental_id: b, quantize }))
+          }
           busy={!!activeDraftJob}
           onError={onError}
         />
