@@ -14,9 +14,12 @@ from typing import Callable
 import httpx
 
 from . import camelot, config, db
-from .fuzzy import normalize, title_artist_score
+from .fuzzy import artist_score, normalize, title_artist_score, title_score
 
-MATCH_THRESHOLD = 80.0
+# A looked-up song must clearly be the same title by the same artist: wrong
+# numbers are worse than no numbers.
+MIN_TITLE = 85.0
+MIN_ARTIST = 75.0
 # Re-try tracks that weren't found after this long (new songs get added).
 NOT_FOUND_TTL = 30 * 24 * 3600
 
@@ -93,28 +96,22 @@ def _record(song: dict, title: str, artists: list[str]) -> dict | None:
 Getter = Callable[[str, dict], dict]
 
 
-def find_song(title: str, artists: list[str], get: Getter) -> dict | None:
-    """Search by title + first artist; pick the best fuzzy match; fetch the
-    full song record if the search result lacks tempo/key."""
-    clean_title = normalize(title)
-    clean_artist = normalize(artists[0]) if artists else ""
-    lookup = f"song:{clean_title}" + (f" artist:{clean_artist}" if clean_artist else "")
-    data = get("/search/", {"type": "both", "lookup": lookup})
-    results = data.get("search")
+def _accept(title: str, artists: list[str], result: dict) -> float | None:
+    a = result.get("artist") or {}
+    name = a.get("name", "") if isinstance(a, dict) else str(a)
+    t = title_score(title, result.get("title") or "")
+    ar = artist_score(artists, name) if artists else 100.0
+    if t < MIN_TITLE or ar is None or ar < MIN_ARTIST:
+        return None
+    return 0.7 * t + 0.3 * ar
+
+
+def _best_from(results, title: str, artists: list[str], get: Getter) -> dict | None:
     if not isinstance(results, list):
         return None  # {"search": {"error": "no result"}}
-
-    scored = []
-    for r in results:
-        if not isinstance(r, dict):
-            continue
-        a = r.get("artist") or {}
-        name = a.get("name", "") if isinstance(a, dict) else str(a)
-        scored.append((title_artist_score(title, artists, r.get("title") or "", name), r))
-    scored.sort(key=lambda x: -x[0])
-    for score, r in scored:
-        if score < MATCH_THRESHOLD:
-            break
+    scored = [(s, r) for r in results if isinstance(r, dict)
+              for s in [_accept(title, artists, r)] if s is not None]
+    for _, r in sorted(scored, key=lambda x: -x[0]):
         rec = _record(r, title, artists)
         if rec is None and r.get("id"):
             song = get("/song/", {"id": r["id"]}).get("song")
@@ -122,6 +119,24 @@ def find_song(title: str, artists: list[str], get: Getter) -> dict | None:
         if rec:
             return rec
     return None
+
+
+def find_song(title: str, artists: list[str], get: Getter) -> dict | None:
+    """Search by title + first artist, then by title alone if that finds
+    nothing (artist spellings differ, e.g. "Deee‐Lite" with a Unicode hyphen).
+    Only results with a matching title *and* artist are accepted; the full
+    song record is fetched if a search result lacks tempo/key."""
+    clean_title = normalize(title)
+    clean_artist = normalize(artists[0]) if artists else ""
+    if len(clean_title.replace(" ", "")) < 2:
+        return None  # titles like "0" or "( )": the API rejects them, and they'd match anything
+    if clean_artist:
+        data = get("/search/", {"type": "both", "lookup": f"song:{clean_title} artist:{clean_artist}"})
+        rec = _best_from(data.get("search"), title, artists, get)
+        if rec:
+            return rec
+    data = get("/search/", {"type": "song", "lookup": clean_title})
+    return _best_from(data.get("search"), title, artists, get)
 
 
 class Client:
@@ -145,15 +160,23 @@ class Client:
                 time.sleep(wait)
             self._last = time.monotonic()
             self.requests += 1
-            r = self.http.get(self.base + path, params={"api_key": self.api_key, **params})
+            try:
+                r = self.http.get(self.base + path, params={"api_key": self.api_key, **params})
+            except httpx.HTTPError as e:  # network trouble: retry, without the URL in logs
+                if attempt == 3:
+                    raise SongLookupError(f"GetSongBPM unreachable: {type(e).__name__}") from None
+                time.sleep(5 * (attempt + 1))
+                continue
             if r.status_code == 429 or r.status_code >= 500:
                 time.sleep(min(60, int(r.headers.get("Retry-After", 0) or 10 * (attempt + 1))))
                 continue
             if r.status_code in (401, 403):
                 raise SongLookupError(f"GetSongBPM rejected the API key ({r.status_code}): {r.text[:150]}")
-            if r.status_code == 404:
-                return {}
-            r.raise_for_status()
+            if r.status_code in (400, 404):
+                return {}  # bad/odd query for this one track: treat as no result
+            if r.status_code >= 400:
+                # Never let the URL (it carries the API key) into an error message.
+                raise SongLookupError(f"GetSongBPM error {r.status_code} for {path}")
             try:
                 return r.json()
             except ValueError:

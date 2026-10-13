@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, draftUrl } from "./api.js";
 import { useAudioEngine } from "./audio.js";
 import MainWindow from "./windows/MainWindow.jsx";
-import EqWindow from "./windows/EqWindow.jsx";
+import JobsWindow from "./windows/JobsWindow.jsx";
 import PlaylistWindow from "./windows/PlaylistWindow.jsx";
 import MatchesWindow from "./windows/MatchesWindow.jsx";
 import DraftsWindow from "./windows/DraftsWindow.jsx";
@@ -13,6 +13,8 @@ const ACTIVE = new Set(["queued", "running"]);
 export default function App() {
   const [config, setConfig] = useState(null);
   const [folder, setFolder] = useState("");
+  const [findDir, setFindDir] = useState("");
+  const [watch, setWatch] = useState(false);
   const [playlistUrl, setPlaylistUrl] = useState("");
   const [library, setLibrary] = useState([]);
   const [playlist, setPlaylist] = useState(null);
@@ -24,7 +26,6 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0); // bump to re-rank pairs
   const [currentDraft, setCurrentDraft] = useState(null);
   const [selectedTrack, setSelectedTrack] = useState(null);
-  const [showEq, setShowEq] = useState(true);
   const [showPl, setShowPl] = useState(true);
   const [autoPlay, setAutoPlay] = useState(true);
   const [shuffle, setShuffle] = useState(false);
@@ -50,6 +51,8 @@ export default function App() {
     api.config().then((c) => {
       setConfig(c);
       setFolder(c.music_dir || "");
+      setFindDir(c.find_dir || "");
+      setWatch(!!c.watch);
     });
     api.jobs().then((js) => {
       js.forEach((j) => !ACTIVE.has(j.status) && finished.current.add(j.id));
@@ -146,6 +149,7 @@ export default function App() {
 
   const scanJob = jobs.find((j) => j.kind === "scan" && ACTIVE.has(j.status));
   const lookupJob = jobs.find((j) => j.kind === "lookup" && ACTIVE.has(j.status));
+  const findJob = jobs.find((j) => j.kind === "find" && ACTIVE.has(j.status));
   const draftJobs = jobs.filter((j) => j.kind === "draft" && j.error !== "server restarted");
   const activeDraftJob = draftJobs.find((j) => ACTIVE.has(j.status));
   const trackB = draft ? library.find((t) => t.id === draft.b) : null;
@@ -162,21 +166,13 @@ export default function App() {
           onPrev={() => step(-1)}
           onNext={() => step(1)}
           onEject={() => draft && (window.location.href = draftUrl(draft.draft_id, draft.mp3 || draft.wav))}
-          showEq={showEq}
+          autoPlay={autoPlay}
+          onAutoPlay={() => setAutoPlay(!autoPlay)}
           showPl={showPl}
-          onToggleEq={() => setShowEq(!showEq)}
           onTogglePl={() => setShowPl(!showPl)}
           shuffle={shuffle}
           onShuffle={() => setShuffle(!shuffle)}
         />
-        {showEq && (
-          <EqWindow
-            engine={engine}
-            autoPlay={autoPlay}
-            onAutoPlay={() => setAutoPlay(!autoPlay)}
-            onClose={() => setShowEq(false)}
-          />
-        )}
         {showPl && (
           <PlaylistWindow
             config={config}
@@ -199,11 +195,24 @@ export default function App() {
             lookupJob={lookupJob}
             onLookup={() => startJob(api.lookup)}
             onCancelJob={(id) => startJob(() => api.cancelJob(id))}
+            findDir={findDir}
+            onFindDir={setFindDir}
+            onFind={() => findDir && startJob(() => api.find(findDir, watch))}
+            findJob={findJob}
+            watch={watch}
+            onWatch={async () => {
+              try {
+                setWatch((await api.setWatch(!watch)).watch);
+              } catch (e) {
+                setError(e.message);
+              }
+            }}
           />
         )}
       </div>
 
       <div className="wa-stack">
+        <JobsWindow jobs={jobs} onCancel={(id) => startJob(() => api.cancelJob(id))} />
         <MatchesWindow
           refreshKey={refreshKey}
           hasPlaylist={!!playlist}

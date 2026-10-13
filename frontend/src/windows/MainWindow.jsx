@@ -5,7 +5,7 @@ import { ChromeButton, Marquee, Pill, Spectrum, formatTime } from "../skin/contr
 /** The main player: plays rendered drafts. */
 export default function MainWindow({
   engine, draft, trackB, activeJob, onPrev, onNext, onEject,
-  showEq, showPl, onToggleEq, onTogglePl, shuffle, onShuffle,
+  autoPlay, onAutoPlay, showPl, onTogglePl, shuffle, onShuffle,
 }) {
   const [remaining, setRemaining] = useState(false);
   const [volume, setVolume] = useState(0.8);
@@ -83,7 +83,7 @@ export default function MainWindow({
             />
           </label>
           <span className="wa-deck-pills">
-            <Pill on={showEq} onClick={onToggleEq} title="Toggle equalizer">EQ</Pill>
+            <Pill on={autoPlay} onClick={onAutoPlay} title="Auto-play each draft as soon as it finishes rendering">AUTO</Pill>
             <Pill on={showPl} onClick={onTogglePl} title="Toggle playlist">PL</Pill>
           </span>
         </div>

@@ -35,24 +35,41 @@ def normalize(text: str) -> str:
     return _SPACES.sub(" ", text).strip()
 
 
-def title_artist_score(
-    title_a: str, artists_a: list[str], title_b: str, artist_b: str
-) -> float:
-    """0..100 similarity. Title dominates; artist only counts when the local
-    file has one (filenames often lack it)."""
+# Below this artist similarity it's a different artist's song with the same
+# name ("Diva" by Model/Actriz is not "DIVA" by ART-SCHOOL).
+ARTIST_MIN = 60.0
+
+
+def title_score(title_a: str, title_b: str) -> float:
     ta, tb = normalize(title_a), normalize(title_b)
     if not ta or not tb:
         return 0.0
-    title = max(fuzz.token_sort_ratio(ta, tb), fuzz.ratio(ta, tb))
+    return max(fuzz.token_sort_ratio(ta, tb), fuzz.ratio(ta, tb))
 
+
+def artist_score(artists_a: list[str], artist_b: str) -> float | None:
+    """0..100, or None when B has no artist to compare."""
     ab = normalize(artist_b)
     if not ab:
-        return title * 0.9  # can't confirm the artist; slightly less sure
+        return None
     joined = normalize(" ".join(artists_a))
-    artist = max(
+    return max(
         [fuzz.token_set_ratio(joined, ab)]
         + [fuzz.token_set_ratio(normalize(a), ab) for a in artists_a]
     )
+
+
+def title_artist_score(
+    title_a: str, artists_a: list[str], title_b: str, artist_b: str
+) -> float:
+    """0..100 similarity. Title dominates; the artist only counts when B has
+    one (filenames often lack it), but a clearly different artist is a veto."""
+    title = title_score(title_a, title_b)
+    artist = artist_score(artists_a, artist_b)
+    if artist is None:
+        return title * 0.9  # can't confirm the artist; slightly less sure
+    if artist < ARTIST_MIN:
+        return 0.0
     return 0.7 * title + 0.3 * artist
 
 

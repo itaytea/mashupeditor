@@ -95,3 +95,30 @@ def test_ranking_thousands_is_fast():
     pairs = rank_pairs(tracks, limit=300)
     assert len(pairs) == 300
     assert time.perf_counter() - t0 < 10
+
+
+def test_copies_of_the_same_song_are_not_paired():
+    tracks = [
+        dict(track(1, 120, A, "minor"), title="Can I Be Honest", artist=""),
+        dict(track(2, 120, A, "minor"), title="CAN I BE HONEST", artist=""),         # copy
+        dict(track(3, 120, A, "minor"), title="Can I Be Honest", artist="Someone"),  # untagged copy above
+        dict(track(4, 121, A, "minor"), title="Other Song", artist="X"),
+        dict(track(5, 122, A, "minor"), title="Other Song", artist="Y"),             # different artist: keep
+    ]
+    pairs = rank_pairs(tracks)
+    ids = {p["a"] for p in pairs} | {p["b"] for p in pairs}
+    assert ids == {1, 4, 5}
+    assert all({p["a"], p["b"]} != {1, 2} for p in pairs)
+
+
+def test_unsure_key_counts_for_less_in_both_paths():
+    from app.matching import rank_pairs_bruteforce
+
+    sure = [dict(track(1, 120, A, "minor"), key_confidence=0.3), dict(track(2, 120, A, "minor"), key_confidence=0.3)]
+    unsure = [dict(track(1, 120, A, "minor"), key_confidence=0.3), dict(track(2, 120, A, "minor"), key_confidence=0.01)]
+    (p_sure,), (p_unsure,) = rank_pairs(sure), rank_pairs(unsure)
+    assert p_sure["score"] == 1.0
+    assert p_unsure["score"] < p_sure["score"]
+    assert any("unsure" in r for r in p_unsure["reasons"])
+    tracks = [dict(t, key_confidence=(0.01 if t["id"] % 3 == 0 else 0.4)) for t in random_tracks(120, seed=11)]
+    assert [p["score"] for p in rank_pairs(tracks, limit=80)] == [p["score"] for p in rank_pairs_bruteforce(tracks, limit=80)]

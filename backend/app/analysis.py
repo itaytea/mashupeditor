@@ -60,14 +60,36 @@ def fold_bpm(bpm: float, low: float = 70.0, high: float = 180.0) -> float:
     return bpm
 
 
+# Bump when the analysis changes so cached results get recomputed.
+ANALYSIS_VERSION = 2
+
+
+def precise_bpm(percussive: np.ndarray, sr: int) -> float:
+    """Tempo at the strongest beat level, refined by fitting a line through
+    the tracked beats. librosa's own estimate moves in ~5 BPM steps at fast
+    tempos and often lands on a 2/3 level (112 for a 170 BPM track)."""
+    import librosa
+
+    from . import sync
+
+    env = librosa.onset.onset_strength(y=percussive, sr=sr, hop_length=sync.HOP)
+    levels = sync.tempo_levels(env) if sr == sync.SR else []
+    start = levels[0] if levels else None
+    tempo, beats = librosa.beat.beat_track(
+        onset_envelope=env, sr=sr, hop_length=sync.HOP, units="time",
+        **({"start_bpm": start, "tightness": 300} if start else {}),
+    )
+    if len(beats) >= 8:
+        period = np.polyfit(np.arange(len(beats)), beats, 1)[0]
+        return float(60.0 / period)
+    return float(np.atleast_1d(tempo)[0])
+
+
 def analyze_signal(y: np.ndarray, sr: int) -> dict:
     import librosa
 
     harmonic, percussive = librosa.effects.hpss(y)
-
-    onset_env = librosa.onset.onset_strength(y=percussive, sr=sr)
-    tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
-    bpm = fold_bpm(float(np.atleast_1d(tempo)[0]))
+    bpm = fold_bpm(precise_bpm(percussive, sr))
 
     chroma = librosa.feature.chroma_cqt(y=harmonic, sr=sr)
     key = estimate_key(chroma.mean(axis=1))
@@ -98,6 +120,21 @@ def analyze_file(path: Path) -> dict:
 
 _FILENAME_SPLIT = re.compile(r"\s+[-–—]\s+")
 _TRACK_NUMBER = re.compile(r"^\d{1,3}[\s.\-_]+")
+# Junk that downloaded/ripped files carry in their names: "(Official Video)",
+# "[Lyrics]", "HD", a trailing "[11-char video id]", etc.
+_VIDEO_NOISE = re.compile(
+    r"\s*[\(\[](?:[^\)\]]*\b(?:official|lyrics?|visuali[sz]er|audio|video|hd|hq|4k|mv|m/v)\b[^\)\]]*)[\)\]]"
+    r"|\s*\[[A-Za-z0-9_-]{11}\]$"
+    r"|\s+\b(?:official\s+(?:music\s+)?video|lyric\s+video|hd|hq|4k)\s*$",
+    re.IGNORECASE,
+)
+
+
+def clean_title(text: str) -> str:
+    prev = None
+    while prev != text:  # several noise chunks can be stacked
+        prev, text = text, _VIDEO_NOISE.sub("", text).strip().rstrip(" -–—|").strip()
+    return text
 
 
 def read_metadata(path: Path) -> tuple[str, str]:
@@ -114,14 +151,14 @@ def read_metadata(path: Path) -> tuple[str, str]:
         log.debug("could not read tags from %s", path, exc_info=True)
 
     if not title:
-        stem = _TRACK_NUMBER.sub("", path.stem.replace("_", " ")).strip()
+        stem = clean_title(_TRACK_NUMBER.sub("", path.stem.replace("_", " ")).strip())
         parts = _FILENAME_SPLIT.split(stem, maxsplit=1)
         if len(parts) == 2:
             artist = artist or parts[0].strip()
             title = parts[1].strip()
         else:
             title = stem
-    return title, artist
+    return clean_title(title), artist
 
 
 # --- folder scan ------------------------------------------------------------
@@ -137,39 +174,86 @@ def find_audio_files(folder: Path) -> list[Path]:
 ProgressFn = Callable[[float, str], None]
 
 
-def scan_folder(folder: Path, progress: ProgressFn | None = None) -> dict:
-    """Analyse every audio file in `folder`, reusing cached results for files
-    whose path, size and mtime are unchanged."""
+def analyze_path(path: Path, title: str | None = None, artist: str | None = None) -> str:
+    """Analyse one file into the cache. Returns "cached", "analyzed" or "failed"."""
+    st = path.stat()
+    if db.get_cached_track(str(path), st.st_mtime, st.st_size, ANALYSIS_VERSION):
+        return "cached"
+    if title is None:
+        title, artist = read_metadata(path)
+    rec: dict = {
+        "path": str(path), "mtime": st.st_mtime, "size": st.st_size,
+        "title": title, "artist": artist, "analyzed_at": time.time(), "error": None,
+        "version": ANALYSIS_VERSION,
+    }
+    status = "analyzed"
+    try:
+        rec.update(analyze_file(path))
+    except Exception as e:  # keep going; record the failure
+        log.warning("analysis failed for %s: %s", path, e)
+        rec["error"] = str(e)[:500]
+        status = "failed"
+    db.upsert_track(rec)
+    return status
+
+
+def _resolve_folder(folder: Path) -> Path:
     folder = folder.expanduser().resolve()
     if not folder.is_dir():
         raise FileNotFoundError(f"not a folder: {folder}")
+    return folder
 
-    files = find_audio_files(folder)
+
+def scan_folder(folder: Path, progress: ProgressFn | None = None) -> dict:
+    """Analyse every audio file in `folder`, reusing cached results for files
+    whose path, size and mtime are unchanged."""
+    files = find_audio_files(_resolve_folder(folder))
     stats = {"total": len(files), "cached": 0, "analyzed": 0, "failed": 0}
     for i, path in enumerate(files):
         if progress:
             progress(i / max(len(files), 1), f"{i + 1}/{len(files)}: {path.name}")
-        st = path.stat()
-        if db.get_cached_track(str(path), st.st_mtime, st.st_size):
-            stats["cached"] += 1
-            continue
-
-        title, artist = read_metadata(path)
-        rec: dict = {
-            "path": str(path), "mtime": st.st_mtime, "size": st.st_size,
-            "title": title, "artist": artist, "analyzed_at": time.time(),
-            "error": None,
-        }
-        try:
-            rec.update(analyze_file(path))
-            stats["analyzed"] += 1
-        except Exception as e:  # keep going; record the failure
-            log.warning("analysis failed for %s: %s", path, e)
-            rec["error"] = str(e)[:500]
-            stats["failed"] += 1
-        db.upsert_track(rec)
+        stats[analyze_path(path)] += 1
 
     if progress:
         progress(1.0, f"Done: {stats['analyzed']} analysed, {stats['cached']} cached, "
                       f"{stats['failed']} failed")
+    return stats
+
+
+def find_in_folder(
+    folder: Path, wanted: list[dict], progress: ProgressFn | None = None,
+    files: list[Path] | None = None,
+) -> dict:
+    """Look for playlist tracks you don't own among the files in `folder`.
+
+    Only names/tags are read for every file; just the files that match a
+    wanted track ({title, artists}) get the slow audio analysis. Returns the
+    paths it checked so a watcher can skip them next time.
+    """
+    from .fuzzy import match_playlist
+
+    folder = _resolve_folder(folder)
+    files = find_audio_files(folder) if files is None else files
+    report = progress or (lambda f, m: None)
+    candidates = []
+    for i, path in enumerate(files):
+        if i % 25 == 0:
+            report(0.3 * i / max(len(files), 1), f"Reading names {i + 1}/{len(files)}")
+        try:
+            title, artist = read_metadata(path)
+        except OSError:
+            continue
+        candidates.append({"id": len(candidates), "title": title, "artist": artist, "path": path})
+
+    matches = [m for m in match_playlist(wanted, candidates) if m.track_id is not None]
+    stats = {"files": len(files), "matched": len(matches), "analyzed": 0, "cached": 0,
+             "failed": 0, "found": []}
+    for k, m in enumerate(matches):
+        c = candidates[m.track_id]
+        report(0.3 + 0.7 * k / max(len(matches), 1), f"Analysing {c['path'].name}")
+        stats[analyze_path(c["path"], c["title"], c["artist"])] += 1
+        stats["found"].append(f"{wanted[m.position]['title']} ← {c['path'].name}")
+    report(1.0, f"Found {len(matches)} wanted track{'s' if len(matches) != 1 else ''} "
+                f"in {len(files)} files")
+    stats["checked"] = [str(p) for p in files]
     return stats

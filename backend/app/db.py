@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     camelot        TEXT,
     key_confidence REAL,
     error          TEXT,
-    analyzed_at    REAL
+    analyzed_at    REAL,
+    version        INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS playlist (
@@ -94,21 +95,27 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 _conn: sqlite3.Connection | None = None
 
 
-def init(path: Path | None = None) -> None:
+def init(path: Path | None = None, recover_jobs: bool = False) -> None:
+    """Open the database and create tables. Only the server should pass
+    recover_jobs=True: it marks jobs left running by a previous server process
+    as failed, which would wrongly kill live jobs if a script did it."""
     global _conn
     config.ensure_dirs()
     _conn = connect(path)
     _conn.executescript(SCHEMA)
+    tcols = {r["name"] for r in _conn.execute("PRAGMA table_info(tracks)")}
+    if "version" not in tcols:  # databases from before analysis versioning
+        _conn.execute("ALTER TABLE tracks ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
     cols = {r["name"] for r in _conn.execute("PRAGMA table_info(jobs)")}
     if "cancel" not in cols:  # databases created before cancellation existed
         _conn.execute("ALTER TABLE jobs ADD COLUMN cancel INTEGER NOT NULL DEFAULT 0")
-    # Jobs that were running when the server stopped will never finish.
-    now = time.time()
-    _conn.execute(
-        "UPDATE jobs SET status='failed', error='server restarted', updated_at=? "
-        "WHERE status IN ('queued', 'running')",
-        (now,),
-    )
+    if recover_jobs:
+        # Jobs that were running when the server stopped will never finish.
+        _conn.execute(
+            "UPDATE jobs SET status='failed', error='server restarted', updated_at=? "
+            "WHERE status IN ('queued', 'running')",
+            (time.time(),),
+        )
     _conn.commit()
 
 
@@ -136,11 +143,12 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 # --- tracks -----------------------------------------------------------------
 
-def get_cached_track(path: str, mtime: float, size: int) -> dict | None:
+def get_cached_track(path: str, mtime: float, size: int, version: int = 1) -> dict | None:
     with cursor() as c:
         c.execute(
-            "SELECT * FROM tracks WHERE path=? AND mtime=? AND size=? AND error IS NULL",
-            (path, mtime, size),
+            "SELECT * FROM tracks WHERE path=? AND mtime=? AND size=? AND error IS NULL "
+            "AND version >= ?",
+            (path, mtime, size, version),
         )
         return row_to_dict(c.fetchone())
 

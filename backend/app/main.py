@@ -11,19 +11,41 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from . import analysis, config, db, fuzzy, jobs, matching, render, songlookup, spotify
+from . import (analysis, config, db, fuzzy, jobs, matching, render, settings, songlookup,
+               spotify, watcher)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 # httpx logs every request URL at INFO, which would print API keys.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-_state: dict[str, str] = {"music_dir": config.MUSIC_DIR}
+def _start_find(folder: Path, files: list[Path] | None = None) -> str | None:
+    """Start a FIND job: look for unowned playlist tracks among files in `folder`."""
+    pl = db.get_playlist()
+    wanted = [r for r in pl["tracks"] if not r["track_id"]] if pl else []
+    if not wanted:
+        _watcher.mark_checked([str(p) for p in (files or analysis.find_audio_files(folder))])
+        return None
+
+    def work(ctx: jobs.JobContext) -> dict:
+        stats = analysis.find_in_folder(folder, wanted, ctx.progress, files=files)
+        _watcher.mark_checked(stats.pop("checked"))
+        if stats["matched"]:
+            _rematch_playlist()
+        return stats
+
+    return jobs.submit("find", {"folder": str(folder), "files": len(files) if files else None,
+                                "title": f"Find in {folder.name}"}, work)
+
+
+_watcher = watcher.FolderWatcher(_start_find)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    db.init()
+    db.init(recover_jobs=True)
+    _watcher.start()
     yield
+    _watcher.stop()
 
 
 app = FastAPI(title="Mashup Maker", lifespan=lifespan)
@@ -32,8 +54,8 @@ app = FastAPI(title="Mashup Maker", lifespan=lifespan)
 # --- helpers ----------------------------------------------------------------
 
 def _library_tracks() -> list[dict]:
-    folder = _state.get("music_dir") or None
-    return db.list_tracks(folder)
+    """Every analysed file that still exists, from SCAN or FIND folders."""
+    return [t for t in db.list_tracks() if Path(t["path"]).exists()]
 
 
 def _rematch_playlist() -> None:
@@ -58,8 +80,11 @@ def _track_or_404(track_id: int) -> dict:
 
 @app.get("/api/config")
 def get_config() -> dict:
+    s = settings.load()
     return {
-        "music_dir": _state.get("music_dir", ""),
+        "music_dir": s["music_dir"],
+        "find_dir": s["find_dir"],
+        "watch": s["watch"],
         "spotify_configured": spotify.is_configured(),
         "spotify_connected": spotify.is_connected(),
         "spotify_user": spotify.connected_user(),
@@ -79,19 +104,52 @@ def scan_library(req: ScanRequest) -> dict:
     folder = Path(req.folder).expanduser()
     if not folder.is_dir():
         raise HTTPException(400, f"Not a folder: {folder}")
-    _state["music_dir"] = str(folder.resolve())
+    settings.update(music_dir=str(folder.resolve()))
 
     def work(ctx: jobs.JobContext) -> dict:
         stats = analysis.scan_folder(folder, ctx.progress)
         _rematch_playlist()
         return stats
 
-    return {"job_id": jobs.submit("scan", {"folder": str(folder)}, work)}
+    return {"job_id": jobs.submit("scan", {"folder": str(folder), "title": f"Scan {folder.name}"}, work)}
 
 
 @app.get("/api/library")
 def get_library() -> list[dict]:
     return _library_tracks()
+
+
+class FindRequest(BaseModel):
+    folder: str
+    watch: bool | None = None
+
+
+@app.post("/api/find")
+def find_tracks(req: FindRequest) -> dict:
+    """Search a folder (e.g. Downloads) for playlist tracks you don't own yet.
+    Only matching files are analysed. `watch` keeps checking it for new files."""
+    folder = Path(req.folder).expanduser()
+    if not folder.is_dir():
+        raise HTTPException(400, f"Not a folder: {folder}")
+    changes = {"find_dir": str(folder.resolve())}
+    if req.watch is not None:
+        changes["watch"] = req.watch
+    settings.update(**changes)
+    if not db.get_playlist():
+        raise HTTPException(400, "Load a Spotify playlist first, so there's something to look for")
+    job_id = _start_find(folder)
+    if job_id is None:
+        raise HTTPException(400, "You already have every playlist track")
+    return {"job_id": job_id}
+
+
+class WatchRequest(BaseModel):
+    watch: bool
+
+
+@app.post("/api/find/watch")
+def set_watch(req: WatchRequest) -> dict:
+    return {"watch": settings.update(watch=req.watch)["watch"]}
 
 
 # --- spotify login ----------------------------------------------------------
@@ -166,7 +224,7 @@ def _local_entity(t: dict) -> dict:
         "id": f"t{t['id']}", "local_id": t["id"], "source": "analysis",
         "title": t["title"], "artist": t["artist"], "bpm": t["bpm"],
         "key_pc": t["key_pc"], "mode": t["mode"], "key_name": t["key_name"],
-        "camelot": t["camelot"],
+        "camelot": t["camelot"], "key_confidence": t["key_confidence"],
     }
 
 
@@ -258,7 +316,7 @@ def create_draft(req: DraftRequest) -> dict:
         )
 
     params = req.model_dump() | {"title": f"{a['title']} × {b['title']}"}
-    return {"job_id": jobs.submit("draft", params, work)}
+    return {"job_id": jobs.submit("draft", params, work, queue="render")}
 
 
 @app.get("/api/drafts")

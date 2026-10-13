@@ -1,14 +1,16 @@
 """Background jobs with progress, persisted to SQLite so the UI can poll them.
 
-Heavy work (folder analysis, Demucs, rendering) runs on a single "heavy"
-worker so two separations never compete for the CPU/GPU at once. Slow,
-network-bound work (metadata lookups) gets its own "net" worker so it never
-holds up a draft.
+Each queue has one worker:
+  "heavy"  - folder analysis (SCAN / FIND)
+  "render" - Demucs + draft rendering, so a draft never waits behind a
+             long library scan
+  "net"    - metadata lookups (network-bound)
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -20,8 +22,17 @@ log = logging.getLogger(__name__)
 
 _executors = {
     "heavy": ThreadPoolExecutor(max_workers=1, thread_name_prefix="mashup-heavy"),
+    "render": ThreadPoolExecutor(max_workers=1, thread_name_prefix="mashup-render"),
     "net": ThreadPoolExecutor(max_workers=1, thread_name_prefix="mashup-net"),
 }
+
+
+_SECRET = re.compile(r"((?:api_key|access_token|client_secret)=)[^&\s'\"]+", re.IGNORECASE)
+
+
+def redact(text: str) -> str:
+    """Mask credentials that libraries put into error messages via URLs."""
+    return _SECRET.sub(r"\1***", text)
 
 
 class Cancelled(Exception):
@@ -54,7 +65,7 @@ class JobContext:
 
 def submit(kind: str, params: dict, fn: Callable[[JobContext], Any], queue: str = "heavy") -> str:
     job_id = uuid.uuid4().hex[:12]
-    db.create_job(job_id, kind, params)
+    db.create_job(job_id, kind, {**params, "queue": queue})
 
     def run() -> None:
         ctx = JobContext(job_id)
@@ -67,8 +78,8 @@ def submit(kind: str, params: dict, fn: Callable[[JobContext], Any], queue: str 
         except Cancelled:
             db.update_job(job_id, status="cancelled", message="Cancelled")
         except Exception as e:
-            log.error("job %s failed:\n%s", job_id, traceback.format_exc())
-            db.update_job(job_id, status="failed", error=str(e)[:1000],
+            log.error("job %s failed:\n%s", job_id, redact(traceback.format_exc()))
+            db.update_job(job_id, status="failed", error=redact(str(e))[:1000],
                           message="Failed")
 
     _executors[queue].submit(run)

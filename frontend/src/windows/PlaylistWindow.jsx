@@ -1,5 +1,6 @@
+import { youtubeUrl } from "../api.js";
 import Window from "../skin/Window.jsx";
-import { ChromeButton, Progress, TrackList, formatTime } from "../skin/controls.jsx";
+import { ChromeButton, Pill, Progress, TrackList, formatTime } from "../skin/controls.jsx";
 
 function Row({ n, text, sub, keyCode, bpm, seconds, dim, lookedUp, selected, onClick, title }) {
   return (
@@ -25,14 +26,21 @@ export default function PlaylistWindow({
   config, playlist, library, view, onView, folder, onFolder, onScan, scanJob,
   playlistUrl, onPlaylistUrl, onLoadPlaylist, loadingPlaylist, onDisconnect,
   selectedTrack, onSelectTrack, onClose, lookupJob, onLookup, onCancelJob,
+  findDir, onFindDir, onFind, findJob, watch, onWatch,
 }) {
+  // Any playlist row can be selected; rows with key/BPM use their entity id
+  // (so Matches can focus on them), the rest a position id.
+  const rowId = (t) => t.entity?.id ?? `p${t.position}`;
+  const selectedRow = playlist?.tracks.find((t) => rowId(t) === selectedTrack);
+  const ytTarget = selectedRow && !selectedRow.local ? selectedRow : null;
   const showPlaylist = view === "playlist" && playlist;
   const matched = playlist ? playlist.tracks.filter((t) => t.local).length : 0;
   const lookedUp = playlist ? playlist.tracks.filter((t) => !t.local && t.lookup).length : 0;
-  const busyJob = scanJob ?? lookupJob;
+  const busyJob = scanJob ?? findJob ?? lookupJob;
 
   let lcdTop;
   if (scanJob) lcdTop = `SCAN ${Math.round(scanJob.progress * 100)}%`;
+  else if (findJob) lcdTop = `FIND ${Math.round(findJob.progress * 100)}%`;
   else if (lookupJob) lcdTop = `LOOKUP ${Math.round(lookupJob.progress * 100)}%`;
   else if (showPlaylist) lcdTop = `${matched} OWNED ${lookedUp} LOOKED UP`;
   else lcdTop = `${library.length} FILES`;
@@ -71,6 +79,12 @@ export default function PlaylistWindow({
               disabled={!playlist}
             />
           )}
+          <ChromeButton
+            icon="youtube"
+            label={ytTarget ? `Search YouTube for "${ytTarget.title}"` : "Select a track you don't own to search YouTube"}
+            disabled={!ytTarget}
+            onClick={() => window.open(youtubeUrl(ytTarget.artists.join(" "), ytTarget.title), "_blank", "noopener")}
+          />
           {config?.spotify_connected ? (
             <ChromeButton icon="spotify" label="Disconnect Spotify" onClick={onDisconnect} />
           ) : (
@@ -115,7 +129,7 @@ export default function PlaylistWindow({
             spellCheck={false}
           />
           <button className="wa-btn" disabled={!folder || !!scanJob}>
-            {scanJob ? "BUSY" : "SCAN"}
+            {scanJob ? (scanJob.status === "queued" ? "QUEUED" : "SCANNING") : "SCAN"}
           </button>
         </form>
         <form
@@ -136,6 +150,34 @@ export default function PlaylistWindow({
           />
           <button className="wa-btn" disabled={!playlistUrl || loadingPlaylist}>
             {loadingPlaylist ? "WAIT" : "LOAD"}
+          </button>
+        </form>
+        <form
+          className="wa-source-row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onFind();
+          }}
+        >
+          <label htmlFor="find" title="Look for playlist tracks you don't own in this folder">FIND</label>
+          <input
+            id="find"
+            className="wa-field"
+            value={findDir}
+            onChange={(e) => onFindDir(e.target.value)}
+            placeholder="/Users/you/Downloads"
+            spellCheck={false}
+          />
+          <Pill
+            on={watch}
+            onClick={onWatch}
+            disabled={!findDir}
+            title="Keep checking this folder every 30s for new files"
+          >
+            WATCH
+          </Pill>
+          <button className="wa-btn" disabled={!findDir || !playlist || !!findJob}>
+            {findJob ? (findJob.status === "queued" ? "QUEUED" : "FINDING") : "FIND"}
           </button>
         </form>
         <div className="wa-source-status">
@@ -162,6 +204,7 @@ export default function PlaylistWindow({
             else if (t.lookup) title = `Not owned. Key/BPM from GetSongBPM: ${t.lookup.key_name}, ${t.lookup.bpm} BPM\nMatched "${t.lookup.matched_title}" by ${t.lookup.matched_artist}`;
             else if (t.lookup_status === "not_found") title = "Not owned, and GetSongBPM has no data for it";
             else title = "Not owned. Press the magnifier to look up its key/BPM";
+            if (!t.local) title += "\nSelect it and press ▶ to search YouTube";
             return (
               <Row
                 key={t.position}
@@ -172,8 +215,8 @@ export default function PlaylistWindow({
                 seconds={(t.duration_ms ?? 0) / 1000}
                 dim={!t.local}
                 lookedUp={!t.local && !!t.lookup}
-                selected={!!e && e.id === selectedTrack}
-                onClick={() => e && onSelectTrack(e.id === selectedTrack ? null : e.id)}
+                selected={rowId(t) === selectedTrack}
+                onClick={() => onSelectTrack(rowId(t) === selectedTrack ? null : rowId(t))}
                 title={title}
               />
             );

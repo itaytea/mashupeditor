@@ -8,10 +8,20 @@ from itertools import combinations
 import numpy as np
 
 from .camelot import score_keys, to_camelot
+from .fuzzy import normalize
 from .tempo import HALF_DOUBLE_PENALTY, MAX_STRETCH, RATIOS, score_tempos
 
 KEY_WEIGHT = 0.55
 TEMPO_WEIGHT = 0.45
+# Below this the key detector was basically guessing; its "match" counts for
+# less. Looked-up keys (no confidence value) are trusted.
+MIN_KEY_CONFIDENCE = 0.05
+UNSURE_KEY_FACTOR = 0.6
+
+
+def _key_trust(t: dict) -> float:
+    conf = t.get("key_confidence")
+    return UNSURE_KEY_FACTOR if conf is not None and conf < MIN_KEY_CONFIDENCE else 1.0
 
 
 def score_pair(a: dict, b: dict) -> dict:
@@ -19,7 +29,11 @@ def score_pair(a: dict, b: dict) -> dict:
     tempo stretch are expressed as adjustments applied to A to fit B."""
     key = score_keys(a["key_pc"], a["mode"], b["key_pc"], b["mode"])
     tempo = score_tempos(a["bpm"], b["bpm"])
-    total = KEY_WEIGHT * key.score + TEMPO_WEIGHT * tempo.score
+    trust = min(_key_trust(a), _key_trust(b))
+    total = KEY_WEIGHT * key.score * trust + TEMPO_WEIGHT * tempo.score
+    reasons = [key.reason, tempo.reason]
+    if trust < 1.0:
+        reasons.append("Key detection was unsure for one of these; the key match may not hold")
     return {
         "a": a["id"],
         "b": b["id"],
@@ -31,12 +45,31 @@ def score_pair(a: dict, b: dict) -> dict:
         "tempo_ratio": tempo.ratio,
         "stretch": round(tempo.stretch, 4),
         "tempo_diff_pct": tempo.diff_pct,
-        "reasons": [key.reason, tempo.reason],
+        "reasons": reasons,
     }
 
 
+def dedupe(tracks: list[dict]) -> list[dict]:
+    """Drop extra copies of the same song (e.g. one file in Music and one in
+    Downloads) so a song is never offered as a match for itself. Same song =
+    same normalized title, and the same artist or one of them untagged. The
+    first copy wins, so callers should list preferred copies first."""
+    kept: list[dict] = []
+    seen: dict[str, list[str]] = {}  # title -> artists already kept
+    for t in tracks:
+        title = normalize(t.get("title") or "")
+        artist = normalize(t.get("artist") or "")
+        if title:
+            artists = seen.setdefault(title, [])
+            if any(a == artist or not a or not artist for a in artists):
+                continue
+            artists.append(artist)
+        kept.append(t)
+    return kept
+
+
 def _usable(tracks: list[dict]) -> list[dict]:
-    return [t for t in tracks if t.get("bpm") and t.get("mode") is not None]
+    return dedupe([t for t in tracks if t.get("bpm") and t.get("mode") is not None])
 
 
 def _sort_key(p: dict) -> tuple:
@@ -101,6 +134,7 @@ def rank_pairs(tracks: list[dict], limit: int | None = 100, min_score: float = 0
 
     bpm = np.array([t["bpm"] for t in usable], dtype=np.float64)
     kidx = np.array([_key_index(t["key_pc"], t["mode"]) for t in usable])
+    trust = np.array([_key_trust(t) for t in usable], dtype=np.float32)
     table = _key_table()
     # Over-select a little so rounding/tie-breaks can't push a true winner out.
     want = min(limit * 2 + 50, n * (n - 1) // 2)
@@ -117,7 +151,8 @@ def rank_pairs(tracks: list[dict], limit: int | None = 100, min_score: float = 0
     cand_j: list[np.ndarray] = []
     for start in range(0, len(rows), chunk):
         ri = np.array(rows[start:start + chunk])
-        total = (KEY_WEIGHT * table[kidx[ri][:, None], kidx[None, :]]
+        pair_trust = np.minimum(trust[ri][:, None], trust[None, :])
+        total = (KEY_WEIGHT * table[kidx[ri][:, None], kidx[None, :]] * pair_trust
                  + TEMPO_WEIGHT * _tempo_matrix(bpm[ri], bpm))
         jj = np.arange(n)[None, :]
         # each unordered pair once; with a focus track, every partner counts

@@ -4,6 +4,14 @@ import { Progress, TrackList, formatTime } from "../skin/controls.jsx";
 
 const ACTIVE = new Set(["queued", "running"]);
 
+// How far A's beats wander against B's over the draft (measured on the audio).
+// Older drafts have no measurement.
+function syncLabel(d) {
+  if (!d.sync) return null;
+  const w = d.sync.wander_ms;
+  return { text: `SYNC ±${Math.round(w / 2)}MS`, loose: w > 60 };
+}
+
 export default function DraftsWindow({ jobs, drafts, current, onSelect }) {
   const active = jobs.filter((j) => ACTIVE.has(j.status));
   const failed = jobs.filter((j) => j.status === "failed").slice(0, 3);
@@ -41,9 +49,9 @@ export default function DraftsWindow({ jobs, drafts, current, onSelect }) {
             {running ? (
               <Progress value={running.progress} />
             ) : (
-              <div className="wa-minilcd-bottom">
+              <div className={`wa-minilcd-bottom ${current && syncLabel(current)?.loose ? "is-warn" : ""}`}>
                 {current
-                  ? `×${current.stretch} ${current.semitones ? `${current.semitones > 0 ? "+" : ""}${current.semitones}ST` : "0ST"} ${current.engine}`.toUpperCase()
+                  ? `${syncLabel(current)?.text ?? "SYNC ?"} ×${current.stretch} ${current.semitones ? `${current.semitones > 0 ? "+" : ""}${current.semitones}ST` : "0ST"}${syncLabel(current)?.loose ? " LOOSE" : ""}`
                   : "NO DRAFT LOADED"}
               </div>
             )}
@@ -80,11 +88,17 @@ export default function DraftsWindow({ jobs, drafts, current, onSelect }) {
             key={d.draft_id}
             className={`wa-row ${d.draft_id === current?.draft_id ? "is-selected" : ""}`}
             onClick={() => onSelect(d.draft_id, true)}
-            title={`Start A @ ${formatTime(d.start_a)}, B @ ${formatTime(d.start_b)}`}
+            title={[
+              `A from ${formatTime(d.start_a)}, B from ${formatTime(d.start_b)}`,
+              d.bpm_a_section && `Tempo: A ${d.bpm_a_section} → B ${d.bpm_b_section} BPM (×${d.stretch})`,
+              d.sync && `Beats wander ${d.sync.wander_ms} ms over the draft (lock ${d.sync.lock})`,
+              d.key_source && `Key: ${d.key_source}`,
+            ].filter(Boolean).join("\n")}
           >
             <span className="wa-row-text">
               {i + 1}. {d.title}
             </span>
+            {syncLabel(d)?.loose && <span className="wa-row-key is-warn">LOOSE</span>}
             <span className="wa-row-time">{formatTime(d.duration).replace(/^0/, "")}</span>
           </button>
         ))}

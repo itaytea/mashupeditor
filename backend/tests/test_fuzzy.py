@@ -37,3 +37,17 @@ def test_read_metadata_falls_back_to_filename(tmp_path):
     p.write_bytes(b"")
     title, artist = read_metadata(p)
     assert (artist, title) == ("Daft Punk", "One More Time")
+
+
+def test_same_title_different_artist_is_vetoed():
+    assert title_artist_score("Diva", ["Model/Actriz"], "DIVA", "ART-SCHOOL") == 0.0
+    assert title_artist_score("Stereo Love", ["Vincent", "KnownAsNat"], "Stereo Love", "Novi Sad") == 0.0
+    # a featured artist alone still counts as the same artist
+    assert title_artist_score("Stereo Love", ["Vincent", "KnownAsNat"], "Stereo Love", "KnownAsNat") > 90
+
+
+def test_local_file_by_other_artist_is_not_matched():
+    playlist = [{"title": "Diva", "artists": ["Model/Actriz"]}]
+    local = [{"id": 1, "title": "Diva", "artist": "Beyoncé"}, {"id": 2, "title": "Diva", "artist": ""}]
+    (m,) = match_playlist(playlist, local)
+    assert m.track_id == 2  # the untagged file may be it; the Beyoncé one isn't

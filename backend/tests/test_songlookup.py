@@ -46,7 +46,8 @@ def fake_api(responses):
 
     def get(path, params):
         calls.append((path, params))
-        return responses[(path, params.get("lookup") or params.get("id"))]
+        return responses.get((path, params.get("lookup") or params.get("id")),
+                             {"search": {"error": "no result"}})
 
     return get, calls
 
@@ -84,8 +85,33 @@ def test_find_song_rejects_poor_matches_and_no_results():
         ]},
     })
     assert find_song("Melatonin", ["Tinashe"], get) is None
-    get, _ = fake_api({("/search/", "song:nothing artist:nobody"): {"search": {"error": "no result"}}})
+    get, calls = fake_api({})
     assert find_song("Nothing", ["Nobody"], get) is None
+    assert [c[1]["type"] for c in calls] == ["both", "song"]  # tried the fallback too
+
+
+def test_same_title_by_another_artist_is_rejected():
+    # Real case: title-only search for "Diva" returns ART-SCHOOL's "DIVA".
+    get, _ = fake_api({
+        ("/search/", "diva"): {"search": [
+            {"id": "a1", "title": "DIVA", "artist": {"name": "ART-SCHOOL"}, "tempo": "87", "key_of": "D"},
+            {"id": "a2", "title": "Diva", "artist": {"name": "Beyoncé"}, "tempo": "150", "key_of": "Cm"},
+        ]},
+    })
+    assert find_song("Diva", ["Model/Actriz"], get) is None
+
+
+def test_title_only_fallback_finds_unusual_artist_spelling():
+    # Real case: GetSongBPM spells Deee-Lite with U+2010, so the artist query misses.
+    get, calls = fake_api({
+        ("/search/", "electric shock"): {"search": [
+            {"id": "e1", "title": "Electric Shock", "artist": {"name": "f(x)"}, "tempo": "128", "key_of": "Am"},
+            {"id": "e2", "title": "Electric Shock", "artist": {"name": "Deee\u2010Lite"}, "tempo": "121", "key_of": "C"},
+        ]},
+    })
+    rec = find_song("Electric Shock", ["Deee-Lite"], get)
+    assert rec["source_id"] == "e2" and rec["bpm"] == 121
+    assert [c[1]["type"] for c in calls] == ["both", "song"]
 
 
 def test_pending_rows_skips_owned_found_and_recent_misses():
@@ -103,3 +129,18 @@ def test_pending_rows_skips_owned_found_and_recent_misses():
         "miss-old": {"status": "not_found", "fetched_at": now - 10**8},
     }
     assert [r["spotify_id"] for r in pending_rows(rows, cached, now)] == ["miss-old", "never"]
+
+
+def test_tiny_titles_are_not_searched():
+    get, calls = fake_api({})
+    assert find_song("0", ["Someone"], get) is None
+    assert find_song("( )", ["Someone"], get) is None
+    assert calls == []
+
+
+def test_redact_masks_keys_in_errors():
+    from app.jobs import redact
+
+    msg = "Client error for url 'https://api.getsong.co/search/?api_key=abc123&type=both&lookup=0'"
+    assert "abc123" not in redact(msg)
+    assert "api_key=***&type=both" in redact(msg)

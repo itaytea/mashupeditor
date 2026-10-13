@@ -690,3 +690,39 @@ button.wa-row { cursor: pointer; }
 .wa-detail-lcd li.is-warn { color: #ffd38a; }
 .wa-detail-lcd li.is-warn::before { content: "! "; color: #ffd38a; }
 .wa-footer-pills .wa-pill { min-width: 40px; padding: 0 7px; }
+
+/* ------------------------------------------------------------ find / youtube */
+
+.wa-source-row .wa-pill { height: 26px; min-width: 0; padding: 0 8px; font-size: 10px; }
+.wa-btn.is-link {
+  display: inline-flex; align-items: center; text-decoration: none;
+  font-size: 10px; max-width: 150px; overflow: hidden; white-space: nowrap;
+}
+.wa-spacer { flex: 1; }
+.wa-detail-actions { flex-wrap: wrap; }
+
+/* ------------------------------------------------------------------ jobs */
+
+.wa-jobs .wa-body { padding-top: 5px; }
+.wa-jobs .wa-list { height: auto; min-height: 60px; max-height: 210px; }
+.wa-job { padding: 5px 8px 6px; border-bottom: 1px solid #22468f; color: var(--list-text); font: 12px/1.3 var(--sans); }
+.wa-job:last-child { border-bottom: 0; }
+.wa-job-head { display: flex; align-items: center; gap: 8px; color: #ffffff; margin-bottom: 4px; }
+.wa-job-kind {
+  flex: none; font: 400 10px/1 var(--pixel); color: #0d1c45;
+  background: #b8cdf5; padding: 3px 5px 2px; border-radius: 3px;
+}
+.wa-job-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wa-job-pct { font: 400 11px/1 var(--pixel); }
+.wa-job-x {
+  width: 20px; height: 20px; padding: 0; border-radius: 50%;
+  border: 1px solid #6c86c4; background: none; color: #b8cdf5; font-size: 11px; line-height: 1;
+}
+.wa-job-x:hover { background: #4a6bb0; color: #fff; }
+.wa-job-msg { margin-top: 3px; color: var(--list-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wa-job.is-waiting .wa-job-kind { background: #5a73aa; color: #e3ecff; }
+.wa-job.is-waiting .wa-job-head { color: var(--list-text); }
+.wa-job.is-done .wa-job-pct { color: #9fe0b4; }
+.wa-job.is-failed .wa-job-pct, .wa-job.is-failed .wa-job-msg { color: #ff9a8f; }
+
+.wa-minilcd-bottom.is-warn, .wa-row-key.is-warn { color: #ffd38a; }

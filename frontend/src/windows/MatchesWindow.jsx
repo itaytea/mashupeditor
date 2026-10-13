@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api.js";
+import { api, youtubeUrl } from "../api.js";
 import Window from "../skin/Window.jsx";
 import { Pill, TrackList } from "../skin/controls.jsx";
 
@@ -16,8 +16,12 @@ export default function MatchesWindow({
 
   useEffect(() => setScope(hasPlaylist ? "playlist" : "library"), [hasPlaylist]);
 
-  // A playlist-only (looked-up) track can't be focused in library scope.
-  const focus = scope === "library" && selectedTrack?.startsWith("s") ? null : selectedTrack;
+  // Rows without key/BPM ("p…") can't be ranked; looked-up tracks ("s…")
+  // only exist in playlist scope.
+  const focus =
+    !selectedTrack || selectedTrack.startsWith("p") || (scope === "library" && selectedTrack.startsWith("s"))
+      ? null
+      : selectedTrack;
 
   useEffect(() => {
     let stale = false;
@@ -126,25 +130,40 @@ export default function MatchesWindow({
               ))}
               {missing.length > 0 && (
                 <li className="is-warn">
-                  To render, add a file for {missing.map((t) => `"${t.title}"`).join(" and ")} to your music folder and SCAN.
+                  To render, get {missing.map((t) => `"${t.title}"`).join(" and ")} into your FIND folder (with WATCH on it's picked up automatically).
                 </li>
               )}
             </ul>
           </div>
           <div className="wa-detail-actions">
+            {missing.map((t) => (
+              <a
+                key={t.id}
+                className="wa-btn is-link"
+                href={youtubeUrl(t.artist, t.title)}
+                target="_blank"
+                rel="noreferrer"
+                title={`Search YouTube for ${t.artist} - ${t.title}`}
+              >
+                ▶ {t.title.length > 14 ? `${t.title.slice(0, 13)}…` : t.title}
+              </a>
+            ))}
+            <span className="wa-spacer" />
             <button
               type="button" className="wa-btn"
               disabled={busy || missing.length > 0}
               onClick={() => onDraft(a.local_id, b.local_id)}
+              title={busy ? "A draft is rendering; see JOBS" : missing.length ? "You need both files" : undefined}
             >
-              A VOX + B INST
+              {busy ? "RENDERING…" : "A VOX + B INST"}
             </button>
             <button
               type="button" className="wa-btn"
               disabled={busy || missing.length > 0}
               onClick={() => onDraft(b.local_id, a.local_id)}
+              title={busy ? "A draft is rendering; see JOBS" : missing.length ? "You need both files" : undefined}
             >
-              B VOX + A INST
+              {busy ? "RENDERING…" : "B VOX + A INST"}
             </button>
           </div>
         </div>

@@ -1,5 +1,9 @@
 # Mashup Maker
 
+> 🚧 **Work in progress.** This is an early personal project. It runs, but expect
+> rough edges: drafts can still sound off, APIs and the data format may change
+> without notice, and there is no packaged release. See [Status](#status) below.
+
 A local assistant for making mashup drafts from **your own audio files**. Give it
 a Spotify playlist URL (used only for track names) and a folder of audio you own.
 It matches the two, detects BPM and key, ranks which pairs will mix well, and
@@ -21,7 +25,7 @@ Song key and BPM data for tracks you don't own is provided by [GetSongBPM](https
 | **M1: Analysis** | Scans the folder, reads title/artist from tags (or `Artist - Title` filenames), detects BPM (librosa beat tracker) and key (chroma + Krumhansl-Kessler profiles). Results are cached in SQLite, keyed on path + size + mtime, so rescans only analyse new or changed files. | `app/analysis.py`, `app/db.py` |
 | **M2: Pair ranking** | Scores every pair by key compatibility on the Camelot wheel (same key, ±1, relative major/minor; otherwise the smallest pitch shift that would fix it) and tempo closeness (including half/double time). Gives a ranked list with the reasons. | `app/camelot.py`, `app/tempo.py`, `app/matching.py` |
 | **M3: Draft render** | Demucs (`htdemucs`) splits both songs into vocals and instrumental (cached). A's vocals are time-stretched and pitch-shifted with Rubber Band to fit B, beat-aligned (beat grid, then refined by onset cross-correlation), level-matched and mixed. Exports WAV and MP3. Runs as a background job with progress. | `app/stems.py`, `app/render.py`, `app/jobs.py` |
-| **M4: UI** | A Winamp-style skin. The player window plays drafts through Web Audio, with a live spectrum analyser, a 10-band EQ with presets, volume and balance. The playlist window shows Camelot key and BPM for each track. Matches and Drafts are playlist-style windows with live job progress and WAV/MP3 downloads. | `frontend/src/` |
+| **M4: UI** | A Winamp-style skin. The player window plays drafts through Web Audio, with a live spectrum analyser, volume and balance. The playlist window shows Camelot key and BPM for each track. Matches and Drafts are playlist-style windows with live job progress and WAV/MP3 downloads. | `frontend/src/` |
 
 **Key/BPM lookup (optional).** Spotify no longer gives new apps key/BPM data
 (its audio-features endpoint returns 403), so for playlist tracks you *don't*
@@ -34,6 +38,16 @@ throttled to stay under the free tier's limit (about 3000 requests/hour), so a
 4000-track playlist takes roughly 1.5 hours the first time. It runs on its own
 worker, can be cancelled, and results are cached (misses are retried after 30
 days). The code is in `app/songlookup.py`.
+
+**FIND folder.** The FIND row in the playlist window searches another folder
+(default `~/Downloads`) for playlist tracks you don't own yet. It reads only
+names and tags for every file, and runs the slow audio analysis only on files
+that match a wanted track, so a folder full of unrelated downloads stays quick.
+With **WATCH** on, it re-checks every 30 seconds and picks up new files
+automatically. Names like `Artist - Title (Official Video) [videoId].mp3` are
+cleaned before matching. Select a track you don't own and press ▶ (or use the
+▶ buttons in Matches) to search YouTube for it. The code is in
+`app/analysis.py` (`find_in_folder`) and `app/watcher.py`.
 
 Playlist rows are matched to local files with fuzzy matching (rapidfuzz). Before
 comparing, it strips "feat.", "Remastered 2011", "Radio Edit" and similar suffixes,
@@ -49,6 +63,28 @@ then assigns matches one-to-one from best score down (`app/fuzzy.py`).
   linearly from 1.0 at 0% apart to 0 at 8% apart. Half/double-time matches
   get ×0.9 so a 1:1 match ranks first.
 * **Pair** = 0.55 × key + 0.45 × tempo.
+
+## Status
+
+Work in progress. What works and what doesn't yet:
+
+**Works**
+- Library analysis with cached, versioned results; precise BPM at the strongest beat level
+- Spotify playlist import (needs a logged-in Spotify account), fuzzy matching to local files
+- Key/BPM lookup for tracks you don't own (GetSongBPM), with a strict title + artist match
+- Pair ranking over thousands of tracks; duplicate copies of a song are never paired
+- Draft rendering that measures tempo per section and locks A's rhythm onto B's,
+  with a sync rating (ms of drift) on every draft
+- FIND/WATCH folder matching, YouTube search links, a JOBS view with cancel
+
+**Known issues / not done yet**
+- Key detection is weak on dense or electronic mixes. When it's unsure, drafts are
+  left unshifted, so vocals can clash harmonically
+- Drafts are rough: one fixed 60-second window, no downbeat detection (bars are
+  assumed to be every 4 beats), basic level balancing, no EQ or effects
+- Songs that change tempo work only if one of their sections locks onto the other song
+- Spotify's development mode may refuse playlists you don't own
+- Single-user and local only: no auth, no packaging, and the UI is desktop-first
 
 ## Setup
 
@@ -110,7 +146,7 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
    library. Click a track in the playlist to show only pairs that include it.
    Select a pair and press **A VOX + B INST** (or **B VOX + A INST**).
 4. The draft renders in the background. Demucs takes roughly 0.5–1× track
-   length on CPU, and the stems are cached afterwards. With **AUTO** on in the EQ
+   length on CPU, and the stems are cached afterwards. With **AUTO** on in the player
    window, the draft plays in the player as soon as it finishes. Download it
    from the Drafts window as WAV or MP3.
 
@@ -139,6 +175,8 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
 | GET | `/api/pairs?scope=playlist\|library&limit=100&focus=&owned=` | Ranked pairs with reasons |
 | POST | `/api/drafts` `{vocals_id, instrumental_id, duration?, semitones?, vocal_gain_db?}` | Starts a render job |
 | GET | `/api/drafts`, `/api/drafts/{id}/draft.wav\|mp3` | Finished drafts |
+| POST | `/api/find` `{folder, watch?}` | Look for unowned playlist tracks in a folder |
+| POST | `/api/find/watch` `{watch}` | Toggle watching the FIND folder |
 | POST | `/api/lookup` | Starts the GetSongBPM key/BPM lookup for the playlist |
 | GET | `/api/jobs`, `/api/jobs/{id}` | Job status and progress |
 | POST | `/api/jobs/{id}/cancel` | Cancel a queued or running job |

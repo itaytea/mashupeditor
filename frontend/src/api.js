@@ -30,10 +30,15 @@ export const api = {
       `/pairs?scope=${scope}&limit=${limit}&owned=${owned}${focus ? `&focus=${encodeURIComponent(focus)}` : ""}`,
     ),
   lookup: () => request("POST", "/lookup"),
+  find: (folder, watch) => request("POST", "/find", { folder, watch }),
+  setWatch: (watch) => request("POST", "/find/watch", { watch }),
   cancelJob: (id) => request("POST", `/jobs/${id}/cancel`),
   createDraft: (body) => request("POST", "/drafts", body),
   drafts: () => request("GET", "/drafts"),
   jobs: () => request("GET", "/jobs"),
 };
+
+export const youtubeUrl = (artist, title) =>
+  `https://www.youtube.com/results?search_query=${encodeURIComponent(`${artist} ${title}`.trim())}`;
 
 export const draftUrl = (draftId, file) => `/api/drafts/${draftId}/${file}`;
