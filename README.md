@@ -1,5 +1,7 @@
 # Mashup Maker
 
+[![CI](https://github.com/itaytea/mashupeditor/actions/workflows/ci.yml/badge.svg)](https://github.com/itaytea/mashupeditor/actions/workflows/ci.yml)
+
 > 🚧 **Work in progress.** This is an early personal project. It runs, but expect
 > rough edges: drafts can still sound off, APIs and the data format may change
 > without notice, and there is no packaged release. See [Status](#status) below.
