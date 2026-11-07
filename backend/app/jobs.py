@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -40,13 +41,25 @@ class Cancelled(Exception):
 
 
 class JobContext:
-    """Handed to job functions so they can report progress and notice cancels."""
+    """Handed to job functions so they can report progress and notice cancels.
+
+    Every progress report is also a cancellation point, so long jobs that
+    report progress (scan, find, draft render) stop soon after a cancel
+    without having to call check_cancelled() themselves."""
+
+    # Minimum seconds between cancel checks made from progress().
+    CANCEL_CHECK_INTERVAL = 0.5
 
     def __init__(self, job_id: str):
         self.job_id = job_id
         self._last: tuple[float, str | None] = (-1.0, None)
+        self._last_cancel_check = float("-inf")
 
     def progress(self, fraction: float, message: str | None = None) -> None:
+        now = time.monotonic()
+        if now - self._last_cancel_check >= self.CANCEL_CHECK_INTERVAL:
+            self._last_cancel_check = now
+            self.check_cancelled()
         fraction = max(0.0, min(1.0, fraction))
         # Skip writes for changes too small to see in a progress bar.
         if abs(fraction - self._last[0]) < 0.005 and message == self._last[1]:
