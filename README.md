@@ -120,7 +120,7 @@ which sounds much rougher, and the UI shows a warning.
 ```bash
 cd backend
 python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt   # runtime only (pins torch/torchaudio 2.5.1)
 cp .env.example .env   # then add your Spotify credentials
 .venv/bin/uvicorn app.main:app --reload --port 8000
 ```
@@ -202,6 +202,7 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
 
 ```bash
 cd backend
+.venv/bin/pip install -r requirements-dev.txt   # runtime deps + pytest
 .venv/bin/python -m pytest            # all tests
 .venv/bin/python -m pytest -m "not slow"   # skip the librosa synthetic-audio test
 ```
