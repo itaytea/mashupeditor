@@ -179,7 +179,7 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
 | `GETSONGBPM_RPS` | `0.8` | Lookup requests per second |
 | `MASHUP_DATA_DIR` | `backend/data` | SQLite DB, stems, drafts |
 | `DEMUCS_MODEL` | `htdemucs` | e.g. `htdemucs_ft` (better, 4× slower) |
-| `DEMUCS_DEVICE` | `cpu` | `cuda` or `mps` if supported |
+| `DEMUCS_DEVICE` | `auto` | `auto` picks cuda, then mps, then cpu; or force `cpu`/`cuda`/`mps` |
 
 ## API
 
