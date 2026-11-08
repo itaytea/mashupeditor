@@ -114,8 +114,8 @@ def separate(
     try:
         with torch.no_grad():
             sources = apply_model(
-                model, wav[None], device=resolve_device(), shifts=1,
-                split=True, overlap=0.25, progress=True,
+                model, wav[None], device=resolve_device(), shifts=config.DEMUCS_SHIFTS,
+                split=True, overlap=config.DEMUCS_OVERLAP, progress=True,
             )[0]
     finally:
         demucs_apply.tqdm = original_tqdm

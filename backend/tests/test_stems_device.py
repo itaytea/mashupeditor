@@ -32,3 +32,26 @@ def test_default_comes_from_config(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(False, False))
     monkeypatch.setattr(stems.config, "DEMUCS_DEVICE", "auto")
     assert stems.resolve_device() == "cpu"
+
+
+def test_shifts_and_overlap_defaults():
+    from app import config
+
+    assert config.DEMUCS_SHIFTS >= 1
+    assert 0 <= config.DEMUCS_OVERLAP < 1
+
+
+def test_shifts_and_overlap_from_env(monkeypatch):
+    import importlib
+
+    from app import config
+
+    monkeypatch.setenv("DEMUCS_SHIFTS", "3")
+    monkeypatch.setenv("DEMUCS_OVERLAP", "0.5")
+    try:
+        importlib.reload(config)
+        assert config.DEMUCS_SHIFTS == 3
+        assert config.DEMUCS_OVERLAP == 0.5
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
