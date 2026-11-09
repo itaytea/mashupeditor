@@ -211,11 +211,14 @@ def save_playlist(pl_id: str, name: str, url: str, tracks: list[dict]) -> None:
         )
 
 
-def set_playlist_matches(matches: dict[int, tuple[int | None, float | None]]) -> None:
+def set_playlist_matches(
+    playlist_id: str, matches: dict[int, tuple[int | None, float | None]]
+) -> None:
     with cursor() as c:
         c.executemany(
-            "UPDATE playlist_tracks SET track_id=?, match_score=? WHERE position=?",
-            [(tid, score, pos) for pos, (tid, score) in matches.items()],
+            "UPDATE playlist_tracks SET track_id=?, match_score=? "
+            "WHERE position=? AND playlist_id=?",
+            [(tid, score, pos, playlist_id) for pos, (tid, score) in matches.items()],
         )
 
 
