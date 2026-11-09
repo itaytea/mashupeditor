@@ -63,9 +63,13 @@ def _rematch_playlist() -> None:
     pl = db.get_playlist()
     if not pl:
         return
+    snapshot_id = pl["id"]
     local = [t for t in _library_tracks() if not t["error"]]
     matches = fuzzy.match_playlist(pl["tracks"], local)
-    db.set_playlist_matches({m.position: (m.track_id, m.score) for m in matches})
+    current = db.get_playlist()
+    if not current or current["id"] != snapshot_id:
+        return  # a different playlist was loaded while matching; drop stale results
+    db.set_playlist_matches(snapshot_id, {m.position: (m.track_id, m.score) for m in matches})
 
 
 def _track_or_404(track_id: int) -> dict:
