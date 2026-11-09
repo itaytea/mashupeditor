@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
 import time
@@ -69,8 +70,10 @@ def _load_user_token() -> dict | None:
 def _save_user_token(tok: dict) -> None:
     config.ensure_dirs()
     path = _token_file()
-    path.write_text(json.dumps(tok))
-    path.chmod(0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(tok))
+    path.chmod(0o600)  # also tighten a pre-existing file
 
 
 def is_connected() -> bool:
