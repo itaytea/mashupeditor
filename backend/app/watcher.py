@@ -18,6 +18,7 @@ class FolderWatcher:
     def __init__(self, start_find: Callable[[Path, list[Path]], str | None]):
         self._start_find = start_find
         self._checked: dict[str, float] = {}  # path -> mtime already looked at
+        self._watch_key: tuple[str, str | None] | None = None  # (folder, playlist id)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -45,11 +46,24 @@ class FolderWatcher:
             except Exception:
                 log.exception("folder watch failed")
 
+    def _current_key(self, folder: Path) -> tuple[str, str | None]:
+        pl = db.get_playlist()
+        return (str(folder), pl["id"] if pl else None)
+
+    def _reset(self) -> None:
+        self._checked.clear()
+
     def tick(self) -> str | None:
         s = settings.load()
         folder = Path(s["find_dir"]).expanduser()
         if not s["watch"] or not folder.is_dir():
             return None
+        key = self._current_key(folder)
+        if key != self._watch_key:
+            if self._watch_key is not None:
+                log.info("watch: playlist or folder changed, resetting checked files")
+                self._reset()
+            self._watch_key = key
         if any(j["status"] in ("queued", "running") for j in db.list_jobs("find", 3)):
             return None
         new = []
