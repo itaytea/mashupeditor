@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -12,6 +13,8 @@ from . import analysis, db, settings
 log = logging.getLogger(__name__)
 
 POLL_SECONDS = 30
+BACKOFF_START = 1 * 60  # seconds; doubles per failure
+BACKOFF_MAX = 30 * 60
 
 
 class FolderWatcher:
@@ -19,6 +22,9 @@ class FolderWatcher:
         self._start_find = start_find
         self._checked: dict[str, float] = {}  # path -> mtime already looked at
         self._watch_key: tuple[str, str | None] | None = None  # (folder, playlist id)
+        self._last_job: str | None = None  # id of the find job we started
+        self._failures = 0
+        self._retry_at = 0.0  # time.monotonic() before which we don't retry
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -52,6 +58,26 @@ class FolderWatcher:
 
     def _reset(self) -> None:
         self._checked.clear()
+        self._failures = 0
+        self._retry_at = 0.0
+        self._last_job = None
+
+    def _note_job_result(self) -> None:
+        """Update backoff from the outcome of the find job this watcher started."""
+        if not self._last_job:
+            return
+        job = db.get_job(self._last_job)
+        if not job or job["status"] in ("queued", "running"):
+            return
+        self._last_job = None
+        if job["status"] == "failed":
+            self._failures += 1
+            delay = min(BACKOFF_START * 2 ** (self._failures - 1), BACKOFF_MAX)
+            self._retry_at = time.monotonic() + delay
+            log.warning("watch: find job failed, backing off %ds", delay)
+        elif job["status"] == "done":
+            self._failures = 0
+            self._retry_at = 0.0
 
     def tick(self) -> str | None:
         s = settings.load()
@@ -64,6 +90,9 @@ class FolderWatcher:
                 log.info("watch: playlist or folder changed, resetting checked files")
                 self._reset()
             self._watch_key = key
+        self._note_job_result()
+        if time.monotonic() < self._retry_at:
+            return None
         if any(j["status"] in ("queued", "running") for j in db.list_jobs("find", 3)):
             return None
         new = []
@@ -77,4 +106,6 @@ class FolderWatcher:
         if not new:
             return None
         log.info("watch: %d new/changed file(s) in %s", len(new), folder)
-        return self._start_find(folder, new)
+        job_id = self._start_find(folder, new)
+        self._last_job = job_id
+        return job_id
