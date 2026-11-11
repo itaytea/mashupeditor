@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from itertools import combinations
 
 import numpy as np
 
 from .camelot import score_keys, to_camelot
-import re
-
 from .fuzzy import normalize
+from .tempo import HALF_DOUBLE_PENALTY, MAX_STRETCH, RATIOS, score_tempos
 
 # Separators between credited artists. " x " only with spaces around it, so
 # an artist actually named "X" stays an artist.
@@ -21,7 +21,6 @@ _ARTIST_SPLIT = re.compile(
 
 def _artist_set(artist: str) -> frozenset[str]:
     return frozenset(n for n in (normalize(p) for p in _ARTIST_SPLIT.split(artist or "")) if n)
-from .tempo import HALF_DOUBLE_PENALTY, MAX_STRETCH, RATIOS, score_tempos
 
 KEY_WEIGHT = 0.55
 TEMPO_WEIGHT = 0.45
