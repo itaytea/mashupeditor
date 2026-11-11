@@ -144,9 +144,12 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 # --- tracks -----------------------------------------------------------------
 
 def get_cached_track(path: str, mtime: float, size: int, version: int = 1) -> dict | None:
+    """Row for an unchanged file at this analysis version or newer. Rows that
+    recorded an analysis error count too (check `error`), so known-bad files
+    are not decoded again on every scan."""
     with cursor() as c:
         c.execute(
-            "SELECT * FROM tracks WHERE path=? AND mtime=? AND size=? AND error IS NULL "
+            "SELECT * FROM tracks WHERE path=? AND mtime=? AND size=? "
             "AND version >= ?",
             (path, mtime, size, version),
         )
