@@ -37,7 +37,11 @@ GETSONGBPM_API = os.environ.get("GETSONGBPM_API", "https://api.getsong.co")
 GETSONGBPM_RPS = float(os.environ.get("GETSONGBPM_RPS", "0.8"))
 
 DEMUCS_MODEL = os.environ.get("DEMUCS_MODEL", "htdemucs")
-DEMUCS_DEVICE = os.environ.get("DEMUCS_DEVICE", "cpu")
+# "auto" picks cuda, then mps, then cpu; or set one explicitly.
+DEMUCS_DEVICE = os.environ.get("DEMUCS_DEVICE", "auto")
+# Demucs quality/speed knobs: random-shift averaging passes and chunk overlap.
+DEMUCS_SHIFTS = int(os.environ.get("DEMUCS_SHIFTS", "1"))
+DEMUCS_OVERLAP = float(os.environ.get("DEMUCS_OVERLAP", "0.25"))
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".aiff", ".aif"}
 

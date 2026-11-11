@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, draftUrl } from "./api.js";
 import { useAudioEngine } from "./audio.js";
 import MainWindow from "./windows/MainWindow.jsx";
@@ -7,8 +7,8 @@ import PlaylistWindow from "./windows/PlaylistWindow.jsx";
 import MatchesWindow from "./windows/MatchesWindow.jsx";
 import DraftsWindow from "./windows/DraftsWindow.jsx";
 import Window from "./skin/Window.jsx";
+import { ACTIVE, useJobs } from "./hooks/useJobs.js";
 
-const ACTIVE = new Set(["queued", "running"]);
 
 export default function App() {
   const [config, setConfig] = useState(null);
@@ -19,7 +19,6 @@ export default function App() {
   const [library, setLibrary] = useState([]);
   const [playlist, setPlaylist] = useState(null);
   const [view, setView] = useState("playlist");
-  const [jobs, setJobs] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [error, setError] = useState("");
   const [loadingPlaylist, setLoadingPlaylist] = useState(false);
@@ -29,7 +28,6 @@ export default function App() {
   const [showPl, setShowPl] = useState(true);
   const [autoPlay, setAutoPlay] = useState(true);
   const [shuffle, setShuffle] = useState(false);
-  const finished = useRef(new Set());
   const engine = useAudioEngine();
 
   const refreshData = useCallback(async () => {
@@ -40,6 +38,9 @@ export default function App() {
     setRefreshKey((k) => k + 1);
     return dr;
   }, []);
+
+  const { load } = engine;
+  const { jobs, setJobs, finished } = useJobs({ refreshData, load, autoPlay, setCurrentDraft, setError });
 
   useEffect(() => {
     // Returning from the Spotify login redirect.
@@ -61,10 +62,9 @@ export default function App() {
     refreshData()
       .then((dr) => dr[0] && setCurrentDraft(dr[0].draft_id))
       .catch((e) => setError(e.message));
-  }, [refreshData]);
+  }, [refreshData, setJobs, finished]);
 
   const draft = drafts.find((d) => d.draft_id === currentDraft) ?? null;
-  const { load } = engine;
 
   const selectDraft = useCallback(
     (id, play = false) => {
@@ -79,35 +79,6 @@ export default function App() {
   useEffect(() => {
     if (draft) load(draftUrl(draft.draft_id, draft.mp3 || draft.wav));
   }, [draft, load]);
-
-  // Poll jobs while any are active; refresh data when one finishes.
-  const anyActive = jobs.some((j) => ACTIVE.has(j.status));
-  useEffect(() => {
-    if (!anyActive) return;
-    let ticks = 0;
-    const timer = setInterval(async () => {
-      const js = await api.jobs();
-      setJobs(js);
-      // A long lookup fills in the playlist as it goes; show results every 15s.
-      if (++ticks % 15 === 0 && js.some((j) => j.kind === "lookup" && j.status === "running")) {
-        refreshData();
-      }
-      const newlyDone = js.filter((j) => !ACTIVE.has(j.status) && !finished.current.has(j.id));
-      if (newlyDone.length) {
-        newlyDone.forEach((j) => finished.current.add(j.id));
-        const dr = await refreshData();
-        const done = newlyDone.find((j) => j.kind === "draft" && j.status === "done");
-        if (done) {
-          const d = dr.find((x) => x.draft_id === done.result.draft_id);
-          setCurrentDraft(done.result.draft_id);
-          if (d) load(draftUrl(d.draft_id, d.mp3 || d.wav), autoPlay);
-        }
-        const failed = newlyDone.find((j) => j.status === "failed");
-        if (failed) setError(`${failed.params.title ?? failed.kind}: ${failed.error}`);
-      }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [anyActive, refreshData, load, autoPlay]);
 
   const startJob = async (fn) => {
     setError("");

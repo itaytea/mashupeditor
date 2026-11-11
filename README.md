@@ -1,5 +1,7 @@
 # Mashup Maker
 
+[![CI](https://github.com/itaytea/mashupeditor/actions/workflows/ci.yml/badge.svg)](https://github.com/itaytea/mashupeditor/actions/workflows/ci.yml)
+
 > 🚧 **Work in progress.** This is an early personal project. It runs, but expect
 > rough edges: drafts can still sound off, APIs and the data format may change
 > without notice, and there is no packaged release. See [Status](#status) below.
@@ -120,7 +122,7 @@ which sounds much rougher, and the UI shows a warning.
 ```bash
 cd backend
 python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt   # runtime only (pins torch/torchaudio 2.5.1)
 cp .env.example .env   # then add your Spotify credentials
 .venv/bin/uvicorn app.main:app --reload --port 8000
 ```
@@ -179,7 +181,9 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
 | `GETSONGBPM_RPS` | `0.8` | Lookup requests per second |
 | `MASHUP_DATA_DIR` | `backend/data` | SQLite DB, stems, drafts |
 | `DEMUCS_MODEL` | `htdemucs` | e.g. `htdemucs_ft` (better, 4× slower) |
-| `DEMUCS_DEVICE` | `cpu` | `cuda` or `mps` if supported |
+| `DEMUCS_DEVICE` | `auto` | `auto` picks cuda, then mps, then cpu; or force `cpu`/`cuda`/`mps` |
+| `DEMUCS_SHIFTS` | `1` | Random-shift passes; more is better but slower |
+| `DEMUCS_OVERLAP` | `0.25` | Overlap between processed chunks |
 
 ## API
 
@@ -202,6 +206,7 @@ Open <http://localhost:5173>. Vite proxies `/api` to the backend on port 8000.
 
 ```bash
 cd backend
+.venv/bin/pip install -r requirements-dev.txt   # runtime deps + pytest
 .venv/bin/python -m pytest            # all tests
 .venv/bin/python -m pytest -m "not slow"   # skip the librosa synthetic-audio test
 ```
@@ -219,3 +224,16 @@ detection on synthetic audio.
 * Key detection is a profile-matching heuristic. It can confuse relative
   major/minor or a fifth, so check the confidence (hover a key badge).
 * One job runs at a time, so separations don't compete for the CPU.
+
+## Security
+
+The backend has no authentication and is meant to run on your own machine. Bind it
+to the loopback interface so it is not reachable from the network:
+
+```
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Requests whose `Host` header is not `localhost`, `127.0.0.1` or `testserver` are
+rejected with 400. Set `MASHUP_ALLOWED_HOSTS` (comma-separated) to allow other
+host names.

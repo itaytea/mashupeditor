@@ -29,6 +29,8 @@ from .tempo import score_tempos
 
 log = logging.getLogger(__name__)
 
+MP3_ENCODE_TIMEOUT_S = 120
+
 ProgressFn = Callable[[float, str], None]
 
 BEATS_PER_BAR = 4
@@ -368,6 +370,26 @@ def labels_between(struct: dict, start: float, end: float) -> list[str]:
 
 # --- main entry --------------------------------------------------------------
 
+def encode_mp3(wav_path: Path, mp3_path: Path) -> Path | None:
+    """Encode wav_path to mp3_path with ffmpeg. Returns None (and leaves no
+    partial file) if encoding fails or hangs, so the draft keeps its WAV."""
+    try:
+        subprocess.run(
+            [shutil.which("ffmpeg"), "-y", "-loglevel", "error", "-i", str(wav_path),
+             "-codec:a", "libmp3lame", "-b:a", "192k", str(mp3_path)],
+            check=True,
+            timeout=MP3_ENCODE_TIMEOUT_S,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        log.warning("MP3 encode failed, keeping WAV-only draft: %s", e)
+        try:
+            Path(mp3_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    return mp3_path
+
+
 def render_draft(
     track_a: dict, track_b: dict, *, duration: float = 60.0,
     semitones: int | None = None, vocal_gain_db: float = 0.0,
@@ -577,12 +599,7 @@ def render_draft(
     mp3_path = None
     if config.has_ffmpeg():
         report(0.98, "Encoding MP3")
-        mp3_path = out_dir / "draft.mp3"
-        subprocess.run(
-            [shutil.which("ffmpeg"), "-y", "-loglevel", "error", "-i", str(wav_path),
-             "-codec:a", "libmp3lame", "-b:a", "192k", str(mp3_path)],
-            check=True,
-        )
+        mp3_path = encode_mp3(wav_path, out_dir / "draft.mp3")
 
     return {
         "draft_id": draft_id,

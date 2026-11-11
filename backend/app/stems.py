@@ -29,6 +29,22 @@ def cached_stems(track: dict) -> dict[str, Path] | None:
     return None
 
 
+def resolve_device(device: str | None = None) -> str:
+    """Turn "auto" into the best available torch device (cuda > mps > cpu).
+    Any other value is returned unchanged."""
+    device = (device or config.DEMUCS_DEVICE or "auto").strip().lower()
+    if device != "auto":
+        return device
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def _get_model():
     global _model
     with _model_lock:
@@ -98,8 +114,8 @@ def separate(
     try:
         with torch.no_grad():
             sources = apply_model(
-                model, wav[None], device=config.DEMUCS_DEVICE, shifts=1,
-                split=True, overlap=0.25, progress=True,
+                model, wav[None], device=resolve_device(), shifts=config.DEMUCS_SHIFTS,
+                split=True, overlap=config.DEMUCS_OVERLAP, progress=True,
             )[0]
     finally:
         demucs_apply.tqdm = original_tqdm

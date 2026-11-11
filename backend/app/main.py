@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -11,6 +12,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import (analysis, config, db, fuzzy, jobs, matching, render, settings, songlookup,
                spotify, watcher)
@@ -51,6 +53,15 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Mashup Maker", lifespan=lifespan)
 
+# The API is a local tool: reject requests whose Host header isn't a loopback name
+# (blocks DNS-rebinding). Override with MASHUP_ALLOWED_HOSTS=host1,host2.
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get("MASHUP_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
+    if h.strip()
+]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+
 
 # --- helpers ----------------------------------------------------------------
 
@@ -63,9 +74,13 @@ def _rematch_playlist() -> None:
     pl = db.get_playlist()
     if not pl:
         return
+    snapshot_id = pl["id"]
     local = [t for t in _library_tracks() if not t["error"]]
     matches = fuzzy.match_playlist(pl["tracks"], local)
-    db.set_playlist_matches({m.position: (m.track_id, m.score) for m in matches})
+    current = db.get_playlist()
+    if not current or current["id"] != snapshot_id:
+        return  # a different playlist was loaded while matching; drop stale results
+    db.set_playlist_matches(snapshot_id, {m.position: (m.track_id, m.score) for m in matches})
 
 
 def _track_or_404(track_id: int) -> dict:
