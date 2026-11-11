@@ -105,7 +105,8 @@ def test_cached_track_checks_mtime_size_error_version(temp_db, tmp_path):
     assert db.get_cached_track(p, 6.0, 10, 1) is None       # file modified
     assert db.get_cached_track(p, 5.0, 11, 1) is None       # file size changed
     db.upsert_track(make_track(p, mtime=5.0, size=10, error="bad"))
-    assert db.get_cached_track(p, 5.0, 10, 1) is None       # failures are retried
+    cached = db.get_cached_track(p, 5.0, 10, 1)             # known failures are cached
+    assert cached is not None and cached["error"] == "bad"
 
 
 def test_list_tracks_order_and_folder_filter(temp_db, tmp_path):
@@ -155,7 +156,7 @@ def test_set_playlist_matches(temp_db, tmp_path):
     tid = db.upsert_track(make_track(tmp_path / "a.mp3"))
     db.save_playlist("p", "P", "u", [
         {"title": "T0", "artists": ["A"]}, {"title": "T1", "artists": ["A"]}])
-    db.set_playlist_matches({0: (tid, 0.93), 1: (None, None)})
+    db.set_playlist_matches("p", {0: (tid, 0.93), 1: (None, None)})
     rows = db.get_playlist()["tracks"]
     assert rows[0]["track_id"] == tid and rows[0]["match_score"] == pytest.approx(0.93)
     assert rows[1]["track_id"] is None and rows[1]["match_score"] is None
@@ -164,7 +165,7 @@ def test_set_playlist_matches(temp_db, tmp_path):
 def test_deleting_track_nulls_playlist_match(temp_db, tmp_path):
     tid = db.upsert_track(make_track(tmp_path / "a.mp3"))
     db.save_playlist("p", "P", "u", [{"title": "T", "artists": ["A"]}])
-    db.set_playlist_matches({0: (tid, 1.0)})
+    db.set_playlist_matches("p", {0: (tid, 1.0)})
     with db.cursor() as c:
         c.execute("DELETE FROM tracks WHERE id=?", (tid,))
     assert db.get_playlist()["tracks"][0]["track_id"] is None
