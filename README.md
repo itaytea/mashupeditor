@@ -224,3 +224,16 @@ detection on synthetic audio.
 * Key detection is a profile-matching heuristic. It can confuse relative
   major/minor or a fifth, so check the confidence (hover a key badge).
 * One job runs at a time, so separations don't compete for the CPU.
+
+## Security
+
+The backend has no authentication and is meant to run on your own machine. Bind it
+to the loopback interface so it is not reachable from the network:
+
+```
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Requests whose `Host` header is not `localhost`, `127.0.0.1` or `testserver` are
+rejected with 400. Set `MASHUP_ALLOWED_HOSTS` (comma-separated) to allow other
+host names.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -11,6 +12,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import (analysis, config, db, fuzzy, jobs, matching, render, settings, songlookup,
                spotify, watcher)
@@ -50,6 +52,15 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Mashup Maker", lifespan=lifespan)
+
+# The API is a local tool: reject requests whose Host header isn't a loopback name
+# (blocks DNS-rebinding). Override with MASHUP_ALLOWED_HOSTS=host1,host2.
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get("MASHUP_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
+    if h.strip()
+]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 
 # --- helpers ----------------------------------------------------------------
