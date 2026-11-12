@@ -104,7 +104,7 @@ def test_cached_track_checks_mtime_size_error_version(temp_db, tmp_path):
     assert db.get_cached_track(p, 5.0, 10, 3) is None       # analysis is outdated
     assert db.get_cached_track(p, 6.0, 10, 1) is None       # file modified
     assert db.get_cached_track(p, 5.0, 11, 1) is None       # file size changed
-    db.upsert_track(make_track(p, mtime=5.0, size=10, error="bad"))
+    db.upsert_track(make_track(p, mtime=5.0, size=10, error="bad", analyzed_at=time.time()))
     cached = db.get_cached_track(p, 5.0, 10, 1)             # known failures are cached
     assert cached is not None and cached["error"] == "bad"
 
