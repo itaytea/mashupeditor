@@ -105,4 +105,30 @@ describe("useJobs", () => {
     await tick(1000);
     expect(props.refreshData).not.toHaveBeenCalled();
   });
+
+  it("surfaces api.jobs rejection and keeps polling", async () => {
+    const { result, props } = setup();
+    const running = [{ id: 7, kind: "scan", status: "running" }];
+    act(() => result.current.setJobs(running));
+    api.jobs.mockRejectedValueOnce(new Error("offline"));
+    api.jobs.mockResolvedValue(running);
+    await tick(1000);
+    expect(props.setError).toHaveBeenCalledWith("Could not refresh jobs: offline");
+    await tick(2000);
+    expect(api.jobs).toHaveBeenCalledTimes(3);
+  });
+
+  it("skips ticks while the previous request is pending", async () => {
+    const { result } = setup();
+    const running = [{ id: 8, kind: "scan", status: "running" }];
+    act(() => result.current.setJobs(running));
+    let resolve;
+    api.jobs.mockImplementationOnce(() => new Promise((r) => { resolve = r; }));
+    api.jobs.mockResolvedValue(running);
+    await tick(4000);
+    expect(api.jobs).toHaveBeenCalledTimes(1);
+    await act(async () => { resolve(running); });
+    await tick(1000);
+    expect(api.jobs).toHaveBeenCalledTimes(2);
+  });
 });
