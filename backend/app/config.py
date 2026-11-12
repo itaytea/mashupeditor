@@ -43,6 +43,10 @@ DEMUCS_DEVICE = os.environ.get("DEMUCS_DEVICE", "auto")
 DEMUCS_SHIFTS = int(os.environ.get("DEMUCS_SHIFTS", "1"))
 DEMUCS_OVERLAP = float(os.environ.get("DEMUCS_OVERLAP", "0.25"))
 
+# Cached analysis failures older than this many hours are retried on the next
+# scan (0 retries them every time).
+ANALYSIS_FAILURE_TTL_HOURS = float(os.environ.get("ANALYSIS_FAILURE_TTL_HOURS", "24"))
+
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".aiff", ".aif"}
 
 

@@ -1,5 +1,7 @@
 """Files whose analysis failed are cached too, so rescans don't retry them."""
 
+import time
+
 import pytest
 
 from app import analysis, db
@@ -23,7 +25,7 @@ def test_get_cached_track_returns_errored_row(tmp_db, tmp_path):
     f = _bad_file(tmp_path)
     st = f.stat()
     db.upsert_track({"path": str(f), "mtime": st.st_mtime, "size": st.st_size,
-                     "error": "boom", "version": 3})
+                     "error": "boom", "version": 3, "analyzed_at": time.time()})
     assert db.get_cached_track(str(f), st.st_mtime, st.st_size, 3)["error"] == "boom"
     # changed file or newer analysis version is a miss
     assert db.get_cached_track(str(f), st.st_mtime + 1, st.st_size, 3) is None
