@@ -10,5 +10,5 @@ mutagen>=1.47
 rapidfuzz>=3.9
 pyrubberband>=0.4
 demucs==4.0.1
-torch==2.5.1
-torchaudio==2.5.1
+torch>=2.5.1,<2.9
+torchaudio>=2.5.1,<2.9
