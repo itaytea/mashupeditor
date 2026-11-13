@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import threading
 from pathlib import Path
 from typing import Any
 
 from . import config
+from .fsutil import atomic_write_text
 
 _lock = threading.Lock()
 DEFAULTS: dict[str, Any] = {
@@ -23,29 +22,24 @@ def _path() -> Path:
     return config.DATA_DIR / "settings.json"
 
 
-def load() -> dict[str, Any]:
-    with _lock:
-        try:
-            saved = json.loads(_path().read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            saved = {}
+def _read() -> dict[str, Any]:
+    try:
+        saved = json.loads(_path().read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        saved = {}
     return {**DEFAULTS, **{k: v for k, v in saved.items() if k in DEFAULTS}}
 
 
-def update(**changes: Any) -> dict[str, Any]:
-    current = load()
-    current.update({k: v for k, v in changes.items() if k in DEFAULTS})
+def load() -> dict[str, Any]:
     with _lock:
+        return _read()
+
+
+def update(**changes: Any) -> dict[str, Any]:
+    # Hold the lock across read-modify-write so concurrent updates don't lose changes.
+    with _lock:
+        current = _read()
+        current.update({k: v for k, v in changes.items() if k in DEFAULTS})
         config.ensure_dirs()
-        path = _path()
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(current, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        atomic_write_text(_path(), json.dumps(current, indent=2), mode=0o600)
     return current
