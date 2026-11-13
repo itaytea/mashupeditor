@@ -43,3 +43,32 @@ def test_token_file_is_private(data_dir):
     path = data_dir / "spotify_token.json"
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     assert json.loads(path.read_text())["access_token"] == "secret"
+
+
+def test_atomic_write_text_replaces_and_sets_mode(tmp_path):
+    from app.fsutil import atomic_write_text
+
+    target = tmp_path / "f.txt"
+    target.write_text("old")
+    os.chmod(target, 0o644)
+    atomic_write_text(target, "new", mode=0o600)
+    assert target.read_text() == "new"
+    if sys.platform != "win32":
+        assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
+    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
+
+
+def test_atomic_write_text_failure_keeps_original(tmp_path, monkeypatch):
+    from app import fsutil
+
+    target = tmp_path / "f.txt"
+    target.write_text("keep")
+
+    def boom(*a, **k):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(fsutil.os, "replace", boom)
+    with pytest.raises(OSError):
+        fsutil.atomic_write_text(target, "lost")
+    assert target.read_text() == "keep"
+    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
