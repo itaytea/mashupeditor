@@ -30,7 +30,7 @@ def test_failed_write_leaves_no_partial_file(data_dir, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(settings.json, "dump", boom)
+    monkeypatch.setattr(settings.json, "dumps", boom)
     with pytest.raises(RuntimeError):
         settings.update(find_dir="/tmp/after")
     assert (data_dir / "settings.json").read_text() == good
@@ -72,3 +72,21 @@ def test_atomic_write_text_failure_keeps_original(tmp_path, monkeypatch):
         fsutil.atomic_write_text(target, "lost")
     assert target.read_text() == "keep"
     assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
+
+
+def test_concurrent_updates_do_not_lose_changes(data_dir):
+    import threading
+
+    keys = ["find_dir", "music_dir"]
+    barrier = threading.Barrier(2)
+
+    def work(key):
+        barrier.wait()
+        for i in range(30):
+            settings.update(**{key: f"/v/{key}/{i}"})
+
+    ts = [threading.Thread(target=work, args=(k,)) for k in keys]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    final = settings.load()
+    assert final["find_dir"] == "/v/find_dir/29" and final["music_dir"] == "/v/music_dir/29"
