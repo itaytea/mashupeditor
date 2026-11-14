@@ -222,7 +222,7 @@ def test_pairs_library_scope_and_filters(client, tmp_path):
     focused = client.get("/api/pairs", params={"scope": "library", "focus": f"t{a}"}).json()
     assert focused["pairs"] and all(f"t{a}" in (p["a"], p["b"]) for p in focused["pairs"])
 
-    high = client.get("/api/pairs", params={"scope": "library", "min_score": 10000}).json()
+    high = client.get("/api/pairs", params={"scope": "library", "min_score": 1.0}).json()
     assert high["pairs"] == []
 
 
