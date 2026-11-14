@@ -50,3 +50,16 @@ def test_scan_counts_known_bad_file_as_failed_without_retry(tmp_db, tmp_path, mo
     f.write_bytes(b"different bytes now")
     assert analysis.scan_folder(tmp_path)["failed"] == 1
     assert len(calls) == 2
+
+
+def test_analyze_path_vanished_file_counts_as_failed(tmp_db, tmp_path):
+    assert analysis.analyze_path(tmp_path / "gone.mp3") == "failed"
+
+
+def test_scan_folder_survives_file_vanishing(tmp_db, tmp_path, monkeypatch):
+    f = _bad_file(tmp_path)
+    ghost = tmp_path / "ghost.mp3"  # listed by the walk, deleted before analysis
+    monkeypatch.setattr(analysis, "find_audio_files", lambda folder: [ghost, f])
+    stats = analysis.scan_folder(tmp_path)
+    assert stats["total"] == 2
+    assert stats["failed"] == 2
