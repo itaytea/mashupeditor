@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -262,7 +262,8 @@ def _row_entity(row: dict) -> dict | None:
 
 
 @app.get("/api/pairs")
-def get_pairs(scope: str = "playlist", limit: int = 100, min_score: float = 0.0,
+def get_pairs(scope: str = "playlist", limit: int = Query(100, ge=1, le=1000),
+              min_score: float = Query(0.0, ge=0.0, le=1.0),
               focus: str | None = None, owned: bool = False) -> dict:
     """Rank pairs across the playlist (your files plus looked-up tracks) or
     across your whole analysed library. `focus` limits to pairs with one track;
@@ -280,7 +281,7 @@ def get_pairs(scope: str = "playlist", limit: int = 100, min_score: float = 0.0,
         raise HTTPException(400, "scope must be 'playlist' or 'library'")
     if owned:
         tracks = [t for t in tracks if t["local_id"]]
-    pairs = matching.rank_pairs(tracks, limit=min(limit, 1000), min_score=min_score,
+    pairs = matching.rank_pairs(tracks, limit=limit, min_score=min_score,
                                 focus=focus)
     ids = {p["a"] for p in pairs} | {p["b"] for p in pairs}
     by_id = {t["id"]: t for t in tracks if t["id"] in ids or t["id"] == focus}

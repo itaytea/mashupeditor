@@ -331,3 +331,15 @@ def test_startup_marks_stale_jobs_failed(data_dir):
         assert c.get("/api/jobs/fin").json()["status"] == "done"
     db._conn.close()
     db._conn = None
+
+
+@pytest.mark.parametrize("params", [
+    {"limit": -1}, {"limit": 0}, {"limit": 1001},
+    {"min_score": -0.1}, {"min_score": 1.5},
+])
+def test_pairs_rejects_out_of_range_params(client, params):
+    assert client.get("/api/pairs", params=params).status_code == 422
+
+
+def test_pairs_accepts_boundary_params(client):
+    assert client.get("/api/pairs", params={"limit": 1000, "min_score": 1.0}).status_code == 200
