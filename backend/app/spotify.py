@@ -18,6 +18,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 from urllib.parse import urlencode
 
@@ -34,6 +35,7 @@ _PLAYLIST_ID = re.compile(r"(?:playlist[/:])([A-Za-z0-9]{22})")
 _BARE_ID = re.compile(r"^[A-Za-z0-9]{22}$")
 
 _pending: dict[str, tuple[str, float]] = {}  # state -> (code_verifier, created)
+_pending_lock = threading.Lock()
 
 
 class SpotifyError(RuntimeError):
@@ -98,10 +100,11 @@ def login_url() -> str:
     ).rstrip(b"=").decode()
     state = secrets.token_urlsafe(16)
     now = time.time()
-    for s, (_, created) in list(_pending.items()):
-        if now - created > 600:
-            del _pending[s]
-    _pending[state] = (verifier, now)
+    with _pending_lock:
+        for s, (_, created) in list(_pending.items()):
+            if now - created > 600:
+                del _pending[s]
+        _pending[state] = (verifier, now)
     return AUTH_URL + "?" + urlencode({
         "client_id": config.SPOTIFY_CLIENT_ID,
         "response_type": "code",
@@ -129,7 +132,8 @@ def _token_request(client: httpx.Client, data: dict) -> dict:
 
 def finish_login(code: str, state: str) -> str:
     """Exchange the callback code for tokens. Returns the user's display name."""
-    pending = _pending.pop(state, None)
+    with _pending_lock:
+        pending = _pending.pop(state, None)
     if not pending:
         raise SpotifyError("Login expired or was started elsewhere; try again")
     with httpx.Client(timeout=20) as client:
