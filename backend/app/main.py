@@ -157,6 +157,9 @@ def find_tracks(req: FindRequest) -> dict:
     settings.update(**changes)
     if not db.get_playlist():
         raise HTTPException(400, "Load a Spotify playlist first, so there's something to look for")
+    running = [j for j in db.list_jobs("find", 5) if j["status"] in ("queued", "running")]
+    if running:
+        return {"job_id": running[0]["id"]}
     job_id = _start_find(folder)
     if job_id is None:
         raise HTTPException(400, "You already have every playlist track")
