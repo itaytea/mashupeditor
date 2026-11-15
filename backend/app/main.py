@@ -120,14 +120,18 @@ def scan_library(req: ScanRequest) -> dict:
     folder = Path(req.folder).expanduser()
     if not folder.is_dir():
         raise HTTPException(400, f"Not a folder: {folder}")
-    settings.update(music_dir=str(folder.resolve()))
+    resolved = str(folder.resolve())
+    for j in db.list_jobs("scan", 5):
+        if j["status"] in ("queued", "running") and j["params"].get("folder") == resolved:
+            return {"job_id": j["id"]}
+    settings.update(music_dir=resolved)
 
     def work(ctx: jobs.JobContext) -> dict:
         stats = analysis.scan_folder(folder, ctx.progress)
         _rematch_playlist()
         return stats
 
-    return {"job_id": jobs.submit("scan", {"folder": str(folder), "title": f"Scan {folder.name}"}, work)}
+    return {"job_id": jobs.submit("scan", {"folder": resolved, "title": f"Scan {folder.name}"}, work)}
 
 
 @app.get("/api/library")
