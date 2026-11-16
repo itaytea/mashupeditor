@@ -19,6 +19,8 @@ import os
 import re
 import secrets
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
 
 import httpx
@@ -177,13 +179,40 @@ def _access_token(client: httpx.Client) -> str:
 
 # --- playlist fetch ----------------------------------------------------------
 
+MAX_429_RETRIES = 3
+RETRY_AFTER_DEFAULT_S = 2.0
+RETRY_AFTER_MAX_S = 30.0
+
+
+def _retry_delay(value: str | None) -> float:
+    """Seconds to wait for a Retry-After header: integer seconds or an HTTP
+    date. Falls back to a short default when missing or unparseable."""
+    delay = RETRY_AFTER_DEFAULT_S
+    if value:
+        value = value.strip()
+        try:
+            delay = float(int(value))
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(value)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                delay = (when - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, IndexError):
+                delay = RETRY_AFTER_DEFAULT_S
+    return max(0.0, min(delay, RETRY_AFTER_MAX_S))
+
+
 def _get(client: httpx.Client, url: str, params: dict | None = None) -> dict:
-    r = client.get(
-        url, params=params, headers={"Authorization": f"Bearer {_access_token(client)}"}
-    )
-    if r.status_code == 429:
-        time.sleep(min(int(r.headers.get("Retry-After", "2")), 30))
-        return _get(client, url, params)
+    for attempt in range(MAX_429_RETRIES + 1):
+        r = client.get(
+            url, params=params, headers={"Authorization": f"Bearer {_access_token(client)}"}
+        )
+        if r.status_code != 429:
+            break
+        if attempt == MAX_429_RETRIES:
+            raise SpotifyError("Spotify is rate limiting requests (429); try again in a minute")
+        time.sleep(_retry_delay(r.headers.get("Retry-After")))
     if r.status_code == 401:
         raise SpotifyError("Spotify rejected the login; click Connect Spotify again")
     if r.status_code == 403:
