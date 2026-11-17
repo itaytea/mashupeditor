@@ -65,7 +65,8 @@ the full-band one. The code is in `app/structure.py`, `app/sync.py` and `app/ren
 
 Playlist rows are matched to local files with fuzzy matching (rapidfuzz). Before
 comparing, it strips "feat.", "Remastered 2011", "Radio Edit" and similar suffixes,
-then assigns matches one-to-one from best score down (`app/fuzzy.py`).
+then scores every playlist/file pair in bulk with `rapidfuzz.process.cdist` and
+assigns matches one-to-one, maximizing the total score (`app/fuzzy.py`).
 
 ### Scoring
 
@@ -215,6 +216,27 @@ The tests cover Camelot mapping and key compatibility (same, relative, ±1 with
 wrap-around, suggested pitch shifts), tempo scoring (closeness, half and double
 time, stretch math), pair ranking, fuzzy title/artist matching, and key/BPM
 detection on synthetic audio.
+
+### Matching benchmark
+
+`backend/scripts/bench_match_playlist.py` times `match_playlist` against the old
+nested-loop version on synthetic data (library = 2x the playlist):
+
+```bash
+cd backend
+.venv/bin/python -m scripts.bench_match_playlist 200 1000 2000
+```
+
+Results on a 2-core CPU (seconds, lower is better):
+
+| Playlist x library | Nested loop (before) | cdist (after) |
+|---|---|---|
+| 200 x 400 | 0.26 | 0.05 |
+| 1000 x 2000 | 7.08 | 1.05 |
+| 2000 x 4000 | 26.13 | 3.86 |
+
+Thresholds and scoring are unchanged. The assignment is now optimal rather than
+greedy, so on this data it finds slightly more matches (e.g. 973 vs 940 of 1000).
 
 ## Limitations
 
