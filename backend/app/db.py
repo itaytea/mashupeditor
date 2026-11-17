@@ -316,3 +316,8 @@ def list_jobs(kind: str | None = None, limit: int | None = 50) -> list[dict]:
     with cursor() as c:
         c.execute(sql, args)
         return [_job_row(r) for r in c.fetchall()]
+
+
+def delete_job(job_id: str) -> None:
+    with cursor() as c:
+        c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
