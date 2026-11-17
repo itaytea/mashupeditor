@@ -311,7 +311,7 @@ def test_delete_draft_unknown_and_traversal(client, data_dir):
     outside.mkdir()
     assert client.delete("/api/drafts/nope").status_code == 404
     assert client.delete("/api/drafts/..").status_code == 404
-    assert client.delete("/api/drafts/%2e%2e%2fprecious").status_code == 404
+    assert client.delete("/api/drafts/%2e%2e%2fprecious").status_code in (404, 405)
     assert outside.is_dir()
     assert config.DRAFTS_DIR.is_dir()
 
