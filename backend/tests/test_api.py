@@ -276,6 +276,46 @@ def test_draft_job_with_stubbed_render(client, tmp_path, monkeypatch):
     assert client.get("/api/drafts").json() == [{"id": "d1", "title": "A x B"}]
 
 
+def test_list_drafts_returns_more_than_100(client):
+    for i in range(130):
+        db.create_job(f"j{i}", "draft", {"title": f"d{i}"})
+        db.update_job(f"j{i}", status="done", result={"draft_id": f"d{i}"})
+    db.create_job("pending", "draft", {"title": "p"})
+    assert len(client.get("/api/drafts").json()) == 130
+
+
+def _make_draft(draft_id, job_id):
+    d = config.DRAFTS_DIR / draft_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "draft.wav").write_bytes(b"RIFF")
+    db.create_job(job_id, "draft", {"title": "t"})
+    db.update_job(job_id, status="done", result={"draft_id": draft_id})
+    return d
+
+
+def test_delete_draft_removes_files_and_job(client, data_dir):
+    d = _make_draft("abc", "j1")
+    _make_draft("keep", "j2")
+    r = client.delete("/api/drafts/abc")
+    assert r.status_code == 200
+    assert not d.exists()
+    assert db.get_job("j1") is None
+    assert [x["draft_id"] for x in client.get("/api/drafts").json()] == ["keep"]
+    assert (config.DRAFTS_DIR / "keep").is_dir()
+    assert client.delete("/api/drafts/abc").status_code == 404
+
+
+def test_delete_draft_unknown_and_traversal(client, data_dir):
+    config.DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+    outside = data_dir / "precious"
+    outside.mkdir()
+    assert client.delete("/api/drafts/nope").status_code == 404
+    assert client.delete("/api/drafts/..").status_code == 404
+    assert client.delete("/api/drafts/%2e%2e%2fprecious").status_code == 404
+    assert outside.is_dir()
+    assert config.DRAFTS_DIR.is_dir()
+
+
 def test_draft_file_serving(client, data_dir):
     d = config.DRAFTS_DIR / "abc"
     d.mkdir(parents=True)
