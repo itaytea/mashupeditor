@@ -338,7 +338,7 @@ def create_draft(req: DraftRequest) -> dict:
 
 @app.get("/api/drafts")
 def list_drafts() -> list[dict]:
-    return [j["result"] for j in db.list_jobs("draft", limit=100)
+    return [j["result"] for j in db.list_jobs("draft", limit=None)
             if j["status"] == "done" and j["result"]]
 
 
