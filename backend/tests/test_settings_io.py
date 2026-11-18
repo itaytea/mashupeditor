@@ -23,6 +23,37 @@ def test_settings_round_trip(data_dir):
     assert json.loads((data_dir / "settings.json").read_text())["watch"] is True
 
 
+def test_concurrent_updates_to_different_keys_are_all_kept(data_dir, monkeypatch):
+    import threading
+    import time
+
+    real_loads = settings.json.loads
+
+    def slow_loads(*a, **k):
+        result = real_loads(*a, **k)
+        time.sleep(0.05)  # widen the read-to-write window to expose lost updates
+        return result
+
+    monkeypatch.setattr(settings.json, "loads", slow_loads)
+    settings.update(find_dir="/tmp/start")  # file exists so every update reads it
+    changes = [{"find_dir": "/tmp/new"}, {"watch": True}, {"music_dir": "/tmp/music"}]
+    barrier = threading.Barrier(len(changes))
+
+    def run(change):
+        barrier.wait()
+        settings.update(**change)
+
+    threads = [threading.Thread(target=run, args=(c,)) for c in changes]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    loaded = settings.load()
+    assert loaded["find_dir"] == "/tmp/new"
+    assert loaded["watch"] is True
+    assert loaded["music_dir"] == "/tmp/music"
+
+
 def test_failed_write_leaves_no_partial_file(data_dir, monkeypatch):
     settings.update(find_dir="/tmp/before")
     good = (data_dir / "settings.json").read_text()
