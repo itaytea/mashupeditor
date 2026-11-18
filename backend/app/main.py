@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -30,7 +32,10 @@ def _start_find(folder: Path, files: list[Path] | None = None) -> str | None:
         return None
 
     def work(ctx: jobs.JobContext) -> dict:
-        stats = analysis.find_in_folder(folder, wanted, ctx.progress, files=files)
+        try:
+            stats = analysis.find_in_folder(folder, wanted, ctx.progress, files=files)
+        finally:
+            _invalidate_exists_cache()
         _watcher.mark_checked(stats.pop("checked"))
         if stats["matched"]:
             _rematch_playlist()
@@ -65,9 +70,33 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 # --- helpers ----------------------------------------------------------------
 
+# path -> (checked_at, exists). Avoids a stat() per library row on every request;
+# cleared after scans/finds, which are what add or move files.
+EXISTS_TTL = 30.0
+_exists_cache: dict[str, tuple[float, bool]] = {}
+_exists_lock = threading.Lock()
+
+
+def _path_exists(path: str) -> bool:
+    now = time.monotonic()
+    with _exists_lock:
+        hit = _exists_cache.get(path)
+        if hit and now - hit[0] < EXISTS_TTL:
+            return hit[1]
+    found = Path(path).exists()
+    with _exists_lock:
+        _exists_cache[path] = (now, found)
+    return found
+
+
+def _invalidate_exists_cache() -> None:
+    with _exists_lock:
+        _exists_cache.clear()
+
+
 def _library_tracks() -> list[dict]:
     """Every analysed file that still exists, from SCAN or FIND folders."""
-    return [t for t in db.list_tracks() if Path(t["path"]).exists()]
+    return [t for t in db.list_tracks() if _path_exists(t["path"])]
 
 
 def _rematch_playlist() -> None:
@@ -123,7 +152,10 @@ def scan_library(req: ScanRequest) -> dict:
     settings.update(music_dir=str(folder.resolve()))
 
     def work(ctx: jobs.JobContext) -> dict:
-        stats = analysis.scan_folder(folder, ctx.progress)
+        try:
+            stats = analysis.scan_folder(folder, ctx.progress)
+        finally:
+            _invalidate_exists_cache()
         _rematch_playlist()
         return stats
 

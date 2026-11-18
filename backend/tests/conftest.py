@@ -53,3 +53,13 @@ def make_track(path, **over):
     }
     rec.update(over)
     return rec
+
+
+@pytest.fixture(autouse=True)
+def _reset_exists_cache():
+    """The library existence cache is process-global; don't leak it across tests."""
+    from app import main
+
+    main._invalidate_exists_cache()
+    yield
+    main._invalidate_exists_cache()
