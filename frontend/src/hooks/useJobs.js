@@ -10,6 +10,7 @@ export const ACTIVE = new Set(["queued", "running"]);
 export function useJobs({ refreshData, load, autoPlay, setCurrentDraft, setError }) {
   const [jobs, setJobs] = useState([]);
   const finished = useRef(new Set());
+  const inFlight = useRef(false);
 
   // Poll jobs while any are active; refresh data when one finishes.
   const anyActive = jobs.some((j) => ACTIVE.has(j.status));
@@ -17,24 +18,32 @@ export function useJobs({ refreshData, load, autoPlay, setCurrentDraft, setError
     if (!anyActive) return;
     let ticks = 0;
     const timer = setInterval(async () => {
-      const js = await api.jobs();
-      setJobs(js);
-      // A long lookup fills in the playlist as it goes; show results every 15s.
-      if (++ticks % 15 === 0 && js.some((j) => j.kind === "lookup" && j.status === "running")) {
-        refreshData();
-      }
-      const newlyDone = js.filter((j) => !ACTIVE.has(j.status) && !finished.current.has(j.id));
-      if (newlyDone.length) {
-        newlyDone.forEach((j) => finished.current.add(j.id));
-        const dr = await refreshData();
-        const done = newlyDone.find((j) => j.kind === "draft" && j.status === "done");
-        if (done) {
-          const d = dr.find((x) => x.draft_id === done.result.draft_id);
-          setCurrentDraft(done.result.draft_id);
-          if (d) load(draftUrl(d.draft_id, d.mp3 || d.wav), autoPlay);
-        }
-        const failed = newlyDone.find((j) => j.status === "failed");
-        if (failed) setError(`${failed.params.title ?? failed.kind}: ${failed.error}`);
+      if (inFlight.current) return;
+      inFlight.current = true;
+      try {
+          const js = await api.jobs();
+          setJobs(js);
+          // A long lookup fills in the playlist as it goes; show results every 15s.
+          if (++ticks % 15 === 0 && js.some((j) => j.kind === "lookup" && j.status === "running")) {
+            refreshData();
+          }
+          const newlyDone = js.filter((j) => !ACTIVE.has(j.status) && !finished.current.has(j.id));
+          if (newlyDone.length) {
+            newlyDone.forEach((j) => finished.current.add(j.id));
+            const dr = await refreshData();
+            const done = newlyDone.find((j) => j.kind === "draft" && j.status === "done");
+            if (done) {
+              const d = dr.find((x) => x.draft_id === done.result.draft_id);
+              setCurrentDraft(done.result.draft_id);
+              if (d) load(draftUrl(d.draft_id, d.mp3 || d.wav), autoPlay);
+            }
+            const failed = newlyDone.find((j) => j.status === "failed");
+            if (failed) setError(`${failed.params.title ?? failed.kind}: ${failed.error}`);
+          }
+      } catch (e) {
+        setError(`Could not refresh jobs: ${e?.message ?? e}`);
+      } finally {
+        inFlight.current = false;
       }
     }, 1000);
     return () => clearInterval(timer);

@@ -60,12 +60,30 @@ def test_job_that_only_reports_progress_ends_cancelled(temp_db):
     assert calls == []  # stopped at the first report after the cancel
 
 
-def test_progress_cancel_checks_are_throttled(temp_db, monkeypatch):
-    db.create_job("j2", "scan", {})
-    ctx = jobs.JobContext("j2")
+def _throttle_setup(monkeypatch, job_id):
+    db.create_job(job_id, "scan", {})
+    ctx = jobs.JobContext(job_id)
     reads = []
     real_get = db.get_job
     monkeypatch.setattr(db, "get_job", lambda jid: reads.append(jid) or real_get(jid))
+    now = [1000.0]
+    monkeypatch.setattr(jobs.time, "monotonic", lambda: now[0])
+    return ctx, reads, now
+
+
+def test_progress_cancel_checks_are_throttled(temp_db, monkeypatch):
+    ctx, reads, _ = _throttle_setup(monkeypatch, "j2")
     for i in range(100):
         ctx.progress(i / 100)
     assert len(reads) == 1
+
+
+def test_progress_rechecks_cancel_after_interval(temp_db, monkeypatch):
+    ctx, reads, now = _throttle_setup(monkeypatch, "j3")
+    for i in range(50):
+        ctx.progress(i / 100)
+    assert len(reads) == 1
+    now[0] += ctx.CANCEL_CHECK_INTERVAL
+    for i in range(50):
+        ctx.progress(i / 100)
+    assert len(reads) == 2

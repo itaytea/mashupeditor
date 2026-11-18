@@ -142,7 +142,11 @@ def find_song(title: str, artists: list[str], get: Getter) -> dict | None:
 class Client:
     """Throttled GetSongBPM HTTP client."""
 
-    def __init__(self, api_key: str, base: str, rps: float):
+    # Longest single sleep, so a cancel is noticed within about this long.
+    SLEEP_SLICE = 0.5
+
+    def __init__(self, api_key: str, base: str, rps: float,
+                 check_cancelled: Callable[[], None] | None = None):
         if not api_key:
             raise SongLookupError(
                 "Set GETSONGBPM_API_KEY in backend/.env (free key from getsongbpm.com/api)"
@@ -152,12 +156,24 @@ class Client:
         self._last = 0.0
         self.http = httpx.Client(timeout=20, headers={"User-Agent": "mashup-maker/0.1"})
         self.requests = 0
+        self.check_cancelled = check_cancelled
+
+    def _sleep(self, seconds: float) -> None:
+        """Sleep in short slices, calling the cancel check between them."""
+        end = time.monotonic() + seconds
+        while True:
+            if self.check_cancelled:
+                self.check_cancelled()
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(self.SLEEP_SLICE, left))
 
     def get(self, path: str, params: dict) -> dict:
         for attempt in range(4):
             wait = self._last + self.min_gap - time.monotonic()
             if wait > 0:
-                time.sleep(wait)
+                self._sleep(wait)
             self._last = time.monotonic()
             self.requests += 1
             try:
@@ -165,10 +181,10 @@ class Client:
             except httpx.HTTPError as e:  # network trouble: retry, without the URL in logs
                 if attempt == 3:
                     raise SongLookupError(f"GetSongBPM unreachable: {type(e).__name__}") from None
-                time.sleep(5 * (attempt + 1))
+                self._sleep(5 * (attempt + 1))
                 continue
             if r.status_code == 429 or r.status_code >= 500:
-                time.sleep(min(60, int(r.headers.get("Retry-After", 0) or 10 * (attempt + 1))))
+                self._sleep(min(60, int(r.headers.get("Retry-After", 0) or 10 * (attempt + 1))))
                 continue
             if r.status_code in (401, 403):
                 raise SongLookupError(f"GetSongBPM rejected the API key ({r.status_code}): {r.text[:150]}")
@@ -212,7 +228,8 @@ def run_lookup(rows: list[dict], ctx, client: Client | None = None) -> dict:
         return stats
 
     client = client or Client(config.GETSONGBPM_API_KEY, config.GETSONGBPM_API,
-                              config.GETSONGBPM_RPS)
+                              config.GETSONGBPM_RPS,
+                              check_cancelled=ctx.check_cancelled)
     try:
         for i, row in enumerate(todo):
             ctx.check_cancelled()

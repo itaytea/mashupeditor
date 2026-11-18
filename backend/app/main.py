@@ -5,12 +5,16 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+
+
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -31,7 +35,10 @@ def _start_find(folder: Path, files: list[Path] | None = None) -> str | None:
         return None
 
     def work(ctx: jobs.JobContext) -> dict:
-        stats = analysis.find_in_folder(folder, wanted, ctx.progress, files=files)
+        try:
+            stats = analysis.find_in_folder(folder, wanted, ctx.progress, files=files)
+        finally:
+            _invalidate_exists_cache()
         _watcher.mark_checked(stats.pop("checked"))
         if stats["matched"]:
             _rematch_playlist()
@@ -58,7 +65,7 @@ app = FastAPI(title="Mashup Maker", lifespan=lifespan)
 # (blocks DNS-rebinding). Override with MASHUP_ALLOWED_HOSTS=host1,host2.
 ALLOWED_HOSTS = [
     h.strip()
-    for h in os.environ.get("MASHUP_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
+    for h in os.environ.get("MASHUP_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]").split(",")
     if h.strip()
 ]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
@@ -66,9 +73,33 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 # --- helpers ----------------------------------------------------------------
 
+# path -> (checked_at, exists). Avoids a stat() per library row on every request;
+# cleared after scans/finds, which are what add or move files.
+EXISTS_TTL = 30.0
+_exists_cache: dict[str, tuple[float, bool]] = {}
+_exists_lock = threading.Lock()
+
+
+def _path_exists(path: str) -> bool:
+    now = time.monotonic()
+    with _exists_lock:
+        hit = _exists_cache.get(path)
+        if hit and now - hit[0] < EXISTS_TTL:
+            return hit[1]
+    found = Path(path).exists()
+    with _exists_lock:
+        _exists_cache[path] = (now, found)
+    return found
+
+
+def _invalidate_exists_cache() -> None:
+    with _exists_lock:
+        _exists_cache.clear()
+
+
 def _library_tracks() -> list[dict]:
     """Every analysed file that still exists, from SCAN or FIND folders."""
-    return [t for t in db.list_tracks() if Path(t["path"]).exists()]
+    return [t for t in db.list_tracks() if _path_exists(t["path"])]
 
 
 def _rematch_playlist() -> None:
@@ -124,7 +155,10 @@ def scan_library(req: ScanRequest) -> dict:
     settings.update(music_dir=str(folder.resolve()))
 
     def work(ctx: jobs.JobContext) -> dict:
-        stats = analysis.scan_folder(folder, ctx.progress)
+        try:
+            stats = analysis.scan_folder(folder, ctx.progress)
+        finally:
+            _invalidate_exists_cache()
         _rematch_playlist()
         return stats
 
@@ -263,7 +297,8 @@ def _row_entity(row: dict) -> dict | None:
 
 
 @app.get("/api/pairs")
-def get_pairs(scope: str = "playlist", limit: int = 100, min_score: float = 0.0,
+def get_pairs(scope: str = "playlist", limit: int = Query(100, ge=1, le=1000),
+              min_score: float = Query(0.0, ge=0.0, le=1.0),
               focus: str | None = None, owned: bool = False) -> dict:
     """Rank pairs across the playlist (your files plus looked-up tracks) or
     across your whole analysed library. `focus` limits to pairs with one track;
@@ -281,7 +316,7 @@ def get_pairs(scope: str = "playlist", limit: int = 100, min_score: float = 0.0,
         raise HTTPException(400, "scope must be 'playlist' or 'library'")
     if owned:
         tracks = [t for t in tracks if t["local_id"]]
-    pairs = matching.rank_pairs(tracks, limit=min(limit, 1000), min_score=min_score,
+    pairs = matching.rank_pairs(tracks, limit=limit, min_score=min_score,
                                 focus=focus)
     ids = {p["a"] for p in pairs} | {p["b"] for p in pairs}
     by_id = {t["id"]: t for t in tracks if t["id"] in ids or t["id"] == focus}
