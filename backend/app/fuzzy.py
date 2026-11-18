@@ -6,7 +6,13 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from rapidfuzz import fuzz
+import numpy as np
+from rapidfuzz import fuzz, process
+
+try:  # scipy is a runtime dependency, but fall back to greedy if it is missing
+    from scipy.optimize import linear_sum_assignment
+except ImportError:  # pragma: no cover
+    linear_sum_assignment = None
 
 MATCH_THRESHOLD = 75.0
 
@@ -104,36 +110,85 @@ class Match:
     score: float | None
 
 
+_CHUNK = 256  # playlist rows scored per cdist call, to bound memory
+
+
+def _candidate_scores(playlist: list[dict], local_norm: list[tuple[int, str, str]]):
+    """Yield (rows, cols, scores) for every pair scoring >= MATCH_THRESHOLD, computed
+    with rapidfuzz.process.cdist a chunk of playlist rows at a time. Same formula
+    as _combine over _title_score_normalized / _artist_score_normalized."""
+    lt_titles = [t for _, t, _ in local_norm]
+    lt_artists = [a for _, _, a in local_norm]
+    lt_title_ok = np.array([bool(t) for t in lt_titles])
+    lt_artist_ok = np.array([bool(a) for a in lt_artists])
+    for start in range(0, len(playlist), _CHUNK):
+        chunk = playlist[start:start + _CHUNK]
+        titles = [normalize(pt["title"]) for pt in chunk]
+        # Per row: the joined artist string first, then each artist.
+        flat: list[str] = []
+        offsets = []
+        for pt in chunk:
+            joined, each = _normalize_artists(pt["artists"])
+            offsets.append(len(flat))
+            flat.extend([joined, *each])
+        kw = {"dtype": np.float32, "workers": -1}
+        title = np.maximum(
+            process.cdist(titles, lt_titles, scorer=fuzz.token_sort_ratio, **kw),
+            process.cdist(titles, lt_titles, scorer=fuzz.ratio, **kw),
+        ).astype(np.float64)
+        title[~np.array([bool(t) for t in titles])[:, None] | ~lt_title_ok[None, :]] = 0.0
+        artist = np.maximum.reduceat(
+            process.cdist(flat, lt_artists, scorer=fuzz.token_set_ratio, **kw),
+            offsets, axis=0,
+        ).astype(np.float64)
+        score = np.where(
+            lt_artist_ok[None, :],
+            np.where(artist < ARTIST_MIN, 0.0, 0.7 * title + 0.3 * artist),
+            title * 0.9,  # B has no artist: can't confirm it
+        )
+        rows, cols = np.nonzero(score >= MATCH_THRESHOLD)
+        yield rows + start, cols, score[rows, cols]
+
+
+def _assign(rows: np.ndarray, cols: np.ndarray, scores: np.ndarray) -> list[tuple[int, int, float]]:
+    """One-to-one assignment of candidate pairs maximizing the total score
+    (scipy), or greedily from the highest score when scipy is unavailable."""
+    if not len(scores):
+        return []
+    if linear_sum_assignment is None:
+        out, used_r, used_c = [], set(), set()
+        for k in sorted(range(len(scores)), key=lambda k: (-scores[k], rows[k], cols[k])):
+            r, c = int(rows[k]), int(cols[k])
+            if r not in used_r and c not in used_c:
+                used_r.add(r)
+                used_c.add(c)
+                out.append((r, c, float(scores[k])))
+        return out
+    # Only rows/columns that have a candidate matter, which keeps the dense
+    # matrix small even for large libraries.
+    ur, ri = np.unique(rows, return_inverse=True)
+    uc, ci = np.unique(cols, return_inverse=True)
+    cost = np.zeros((len(ur), len(uc)))
+    cost[ri, ci] = scores
+    r_idx, c_idx = linear_sum_assignment(cost, maximize=True)
+    return [(int(ur[r]), int(uc[c]), float(cost[r, c]))
+            for r, c in zip(r_idx, c_idx) if cost[r, c] >= MATCH_THRESHOLD]
+
+
 def match_playlist(playlist: list[dict], local: list[dict]) -> list[Match]:
     """Match each playlist entry ({title, artists}) to at most one local track
-    ({id, title, artist}). Pairs are assigned greedily from highest score so a
-    local file is never claimed by two playlist rows."""
-    # Normalize each side once instead of once per pair.
+    ({id, title, artist}). Every pair is scored in bulk with rapidfuzz's cdist;
+    pairs at or above MATCH_THRESHOLD are then assigned one-to-one so a local
+    file is never claimed by two playlist rows, maximizing the total score."""
+    if not playlist or not local:
+        return [Match(pos, None, None) for pos in range(len(playlist))]
     local_norm = [
         (lt["id"], normalize(lt.get("title") or ""), normalize(lt.get("artist") or ""))
         for lt in local
     ]
-    candidates: list[tuple[float, int, int]] = []
-    for pos, pt in enumerate(playlist):
-        pt_title = normalize(pt["title"])
-        joined, each = _normalize_artists(pt["artists"])
-        for tid, lt_title, lt_artist in local_norm:
-            s = _combine(
-                _title_score_normalized(pt_title, lt_title),
-                _artist_score_normalized(joined, each, lt_artist),
-            )
-            if s >= MATCH_THRESHOLD:
-                candidates.append((s, pos, tid))
-
-    candidates.sort(reverse=True)
-    taken_pos: dict[int, tuple[int, float]] = {}
-    taken_local: set[int] = set()
-    for s, pos, tid in candidates:
-        if pos in taken_pos or tid in taken_local:
-            continue
-        taken_pos[pos] = (tid, round(s, 1))
-        taken_local.add(tid)
-
-    return [
-        Match(pos, *taken_pos.get(pos, (None, None))) for pos in range(len(playlist))
-    ]
+    parts = list(_candidate_scores(playlist, local_norm))
+    rows = np.concatenate([p[0] for p in parts])
+    cols = np.concatenate([p[1] for p in parts])
+    scores = np.concatenate([p[2] for p in parts])
+    taken = {pos: (local_norm[c][0], round(s, 1)) for pos, c, s in _assign(rows, cols, scores)}
+    return [Match(pos, *taken.get(pos, (None, None))) for pos in range(len(playlist))]
