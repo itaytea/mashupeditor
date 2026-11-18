@@ -36,6 +36,7 @@ ProgressFn = Callable[[float, str], None]
 BEATS_PER_BAR = 4
 ALIGN_SEARCH_BEATS = 0.5  # fine alignment searches +/- half a beat
 MAX_PITCH_SHIFT = 6
+MAX_TRACK_SECONDS = 15 * 60  # longer tracks are rejected before the slow stem separation
 
 
 # --- DSP helpers (arrays are shaped (channels, samples)) ---------------------
@@ -402,6 +403,13 @@ def render_draft(
     import soundfile as sf
 
     report = progress or (lambda f, m: None)
+
+    for track in (track_a, track_b):
+        length = track.get("duration")
+        if not length:
+            length = sf.info(track["path"]).duration
+        if length > MAX_TRACK_SECONDS:
+            raise ValueError(f"Track too long for draft (>15 min): {track.get('title') or track['path']}")
 
     # 1. stems (the bulk of the time on first run; cached afterwards)
     stems_a = stems.separate(track_a, lambda f, m: report(0.45 * f, f"A: {m}"))
