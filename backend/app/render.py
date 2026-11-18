@@ -439,7 +439,7 @@ def render_draft(
     env_b = sync.onset_env(inst_b22[b0f:b0f + int(duration * TEMPO_SR)])
     levels_b = sync.tempo_levels(sync.full_band_env(inst_b22[b0f:b0f + int(duration * TEMPO_SR)]))
     # B's beat in this window: its main level, refined by the section's own peaks.
-    bpm_b = min(levels_b, key=lambda l: abs(l / level_b - 1)) if levels_b else level_b
+    bpm_b = min(levels_b, key=lambda lv: abs(lv / level_b - 1)) if levels_b else level_b
     if abs(bpm_b / level_b - 1) > 0.04:
         bpm_b = struct_b["bpm"] or level_b
 

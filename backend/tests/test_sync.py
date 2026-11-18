@@ -26,7 +26,7 @@ def clicks(bpm, seconds, offset=0.0, accent_every=4, seed=0, drift_to=None):
 
 def test_tempo_levels_include_true_tempo():
     levels = sync.tempo_levels(sync.onset_env(clicks(120, 30)))
-    assert any(abs(l - 120) < 3 or abs(l - 60) < 2 or abs(l - 240) < 6 for l in levels)
+    assert any(abs(lv - 120) < 3 or abs(lv - 60) < 2 or abs(lv - 240) < 6 for lv in levels)
 
 
 @pytest.mark.parametrize("bpm_a, bpm_b", [(123, 120), (117.5, 121), (128, 128)])

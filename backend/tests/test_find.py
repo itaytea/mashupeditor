@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from app import analysis, config, db, settings
+from app import config, db, settings
 from app.analysis import clean_title, find_in_folder, read_metadata
 from app.watcher import FolderWatcher
 
