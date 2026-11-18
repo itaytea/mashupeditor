@@ -15,7 +15,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import re
 import secrets
 import time
@@ -24,6 +23,7 @@ from urllib.parse import urlencode
 import httpx
 
 from . import config
+from .fsutil import atomic_write_text
 
 API = "https://api.spotify.com/v1"
 AUTH_URL = "https://accounts.spotify.com/authorize"
@@ -70,10 +70,7 @@ def _load_user_token() -> dict | None:
 def _save_user_token(tok: dict) -> None:
     config.ensure_dirs()
     path = _token_file()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(tok))
-    path.chmod(0o600)  # also tighten a pre-existing file
+    atomic_write_text(path, json.dumps(tok), mode=0o600)
 
 
 def is_connected() -> bool:
