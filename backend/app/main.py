@@ -149,7 +149,11 @@ def scan_library(req: ScanRequest) -> dict:
     folder = Path(req.folder).expanduser()
     if not folder.is_dir():
         raise HTTPException(400, f"Not a folder: {folder}")
-    settings.update(music_dir=str(folder.resolve()))
+    resolved = str(folder.resolve())
+    for j in db.list_jobs("scan", 5):
+        if j["status"] in ("queued", "running") and j["params"].get("folder") == resolved:
+            return {"job_id": j["id"]}
+    settings.update(music_dir=resolved)
 
     def work(ctx: jobs.JobContext) -> dict:
         try:
@@ -159,7 +163,7 @@ def scan_library(req: ScanRequest) -> dict:
         _rematch_playlist()
         return stats
 
-    return {"job_id": jobs.submit("scan", {"folder": str(folder), "title": f"Scan {folder.name}"}, work)}
+    return {"job_id": jobs.submit("scan", {"folder": resolved, "title": f"Scan {folder.name}"}, work)}
 
 
 @app.get("/api/library")
@@ -185,6 +189,9 @@ def find_tracks(req: FindRequest) -> dict:
     settings.update(**changes)
     if not db.get_playlist():
         raise HTTPException(400, "Load a Spotify playlist first, so there's something to look for")
+    running = [j for j in db.list_jobs("find", 5) if j["status"] in ("queued", "running")]
+    if running:
+        return {"job_id": running[0]["id"]}
     job_id = _start_find(folder)
     if job_id is None:
         raise HTTPException(400, "You already have every playlist track")

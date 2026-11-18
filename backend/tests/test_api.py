@@ -385,6 +385,28 @@ def test_startup_marks_stale_jobs_failed(data_dir):
     db._conn = None
 
 
+# --- job dedupe ------------------------------------------------------------
+
+def test_scan_reuses_running_job_for_same_folder(client, tmp_path):
+    folder = tmp_path / "music"
+    folder.mkdir()
+    db.create_job("scan-existing", "scan", {"folder": str(folder.resolve()), "title": "Scan music"})
+    r = client.post("/api/library/scan", json={"folder": str(folder)})
+    assert r.status_code == 200
+    assert r.json()["job_id"] == "scan-existing"
+    assert len(db.list_jobs("scan", 10)) == 1
+
+
+def test_find_reuses_running_job(client, playlist, tmp_path):
+    folder = tmp_path / "dl"
+    folder.mkdir()
+    db.create_job("find-existing", "find", {"folder": str(folder), "title": "Find in dl"})
+    r = client.post("/api/find", json={"folder": str(folder)})
+    assert r.status_code == 200
+    assert r.json()["job_id"] == "find-existing"
+    assert len(db.list_jobs("find", 10)) == 1
+
+
 @pytest.mark.parametrize("params", [
     {"limit": -1}, {"limit": 0}, {"limit": 1001},
     {"min_score": -0.1}, {"min_score": 1.5},
