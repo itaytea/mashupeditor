@@ -23,19 +23,24 @@ def _path() -> Path:
     return config.DATA_DIR / "settings.json"
 
 
-def load() -> dict[str, Any]:
-    with _lock:
-        try:
-            saved = json.loads(_path().read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            saved = {}
+def _load_unlocked() -> dict[str, Any]:
+    try:
+        saved = json.loads(_path().read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        saved = {}
     return {**DEFAULTS, **{k: v for k, v in saved.items() if k in DEFAULTS}}
 
 
-def update(**changes: Any) -> dict[str, Any]:
-    current = load()
-    current.update({k: v for k, v in changes.items() if k in DEFAULTS})
+def load() -> dict[str, Any]:
     with _lock:
+        return _load_unlocked()
+
+
+def update(**changes: Any) -> dict[str, Any]:
+    # Read, merge and write under one lock so concurrent updates can't lose each other.
+    with _lock:
+        current = _load_unlocked()
+        current.update({k: v for k, v in changes.items() if k in DEFAULTS})
         config.ensure_dirs()
         path = _path()
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
