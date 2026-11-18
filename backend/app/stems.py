@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 import types
 from pathlib import Path
@@ -12,8 +13,12 @@ import numpy as np
 
 from . import config
 
+log = logging.getLogger(__name__)
 _model_lock = threading.Lock()
 _model = None
+# Device chosen for DEMUCS_DEVICE=auto, resolved once (and downgraded to "cpu"
+# if the GPU fails), so we don't re-probe or re-fail on every track.
+_auto_device: str | None = None
 
 
 def stem_dir(track: dict) -> Path:
@@ -43,6 +48,25 @@ def resolve_device(device: str | None = None) -> str:
     if mps is not None and mps.is_available():
         return "mps"
     return "cpu"
+
+
+def _active_device() -> str:
+    """The device to separate on. Only "auto" is cached; an explicit
+    DEMUCS_DEVICE is always honoured as given."""
+    global _auto_device
+    if (config.DEMUCS_DEVICE or "auto").strip().lower() != "auto":
+        return resolve_device()
+    if _auto_device is None:
+        _auto_device = resolve_device()
+    return _auto_device
+
+
+def _can_fall_back(device: str) -> bool:
+    """Retry on cpu only when "auto" picked a GPU; never override an explicit choice."""
+    return (
+        (config.DEMUCS_DEVICE or "auto").strip().lower() == "auto"
+        and device != "cpu"
+    )
 
 
 def _get_model():
@@ -108,17 +132,31 @@ def separate(
     wav = (wav - mean) / std
 
     n_passes = len(model.models) if isinstance(model, BagOfModels) else 1
-    shim = _ProgressTqdm(n_passes, lambda f: report(0.05 + 0.9 * f, f"Separating {name}"))
-    original_tqdm = demucs_apply.tqdm
-    demucs_apply.tqdm = types.SimpleNamespace(tqdm=shim.tqdm)
+
+    def run(device: str):
+        shim = _ProgressTqdm(n_passes, lambda f: report(0.05 + 0.9 * f, f"Separating {name}"))
+        original_tqdm = demucs_apply.tqdm
+        demucs_apply.tqdm = types.SimpleNamespace(tqdm=shim.tqdm)
+        try:
+            with torch.no_grad():
+                return apply_model(
+                    model, wav[None], device=device, shifts=config.DEMUCS_SHIFTS,
+                    split=True, overlap=config.DEMUCS_OVERLAP, progress=True,
+                )[0]
+        finally:
+            demucs_apply.tqdm = original_tqdm
+
+    global _auto_device
+    device = _active_device()
     try:
-        with torch.no_grad():
-            sources = apply_model(
-                model, wav[None], device=resolve_device(), shifts=config.DEMUCS_SHIFTS,
-                split=True, overlap=config.DEMUCS_OVERLAP, progress=True,
-            )[0]
-    finally:
-        demucs_apply.tqdm = original_tqdm
+        sources = run(device)
+    except RuntimeError as e:
+        if not _can_fall_back(device):
+            raise
+        log.warning("Demucs failed on %s (%s); retrying on cpu", device, e)
+        report(0.05, f"GPU failed, retrying {name} on CPU")
+        _auto_device = "cpu"
+        sources = run("cpu")
     sources = sources * std + mean
 
     report(0.96, "Writing stems")

@@ -180,7 +180,7 @@ ProgressFn = Callable[[float, str], None]
 
 def analyze_path(path: Path, title: str | None = None, artist: str | None = None) -> str:
     """Analyse one file into the cache. Returns "cached", "analyzed" or "failed"
-    (also "failed", without retrying, for an unchanged file that failed before)."""
+    (also "failed", without retrying, for an unchanged file that failed recently)."""
     try:
         st = path.stat()
     except OSError as e:  # file vanished or became unreadable mid-scan
@@ -188,7 +188,8 @@ def analyze_path(path: Path, title: str | None = None, artist: str | None = None
         return "failed"
     hit = db.get_cached_track(str(path), st.st_mtime, st.st_size, ANALYSIS_VERSION)
     if hit:
-        # A cached error is a known-bad file: count it as failed, don't retry.
+        # A recent cached error is a known-bad file: count it as failed, don't
+        # retry (get_cached_track returns None once the failure TTL has passed).
         return "failed" if hit.get("error") else "cached"
     if title is None:
         title, artist = read_metadata(path)

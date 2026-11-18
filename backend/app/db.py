@@ -146,14 +146,21 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 def get_cached_track(path: str, mtime: float, size: int, version: int = 1) -> dict | None:
     """Row for an unchanged file at this analysis version or newer. Rows that
     recorded an analysis error count too (check `error`), so known-bad files
-    are not decoded again on every scan."""
+    are not decoded again on every scan, until the failure is older than
+    config.ANALYSIS_FAILURE_TTL_HOURS (judged by `analyzed_at`; a failure with
+    no timestamp counts as expired). Expired failures are cache misses."""
     with cursor() as c:
         c.execute(
             "SELECT * FROM tracks WHERE path=? AND mtime=? AND size=? "
             "AND version >= ?",
             (path, mtime, size, version),
         )
-        return row_to_dict(c.fetchone())
+        row = row_to_dict(c.fetchone())
+    if row and row.get("error"):
+        age = time.time() - (row.get("analyzed_at") or 0)
+        if age >= config.ANALYSIS_FAILURE_TTL_HOURS * 3600:
+            return None
+    return row
 
 
 def upsert_track(rec: dict[str, Any]) -> int:

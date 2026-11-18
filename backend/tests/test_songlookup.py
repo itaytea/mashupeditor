@@ -144,3 +144,54 @@ def test_redact_masks_keys_in_errors():
     msg = "Client error for url 'https://api.getsong.co/search/?api_key=abc123&type=both&lookup=0'"
     assert "abc123" not in redact(msg)
     assert "api_key=***&type=both" in redact(msg)
+
+
+def test_cancel_during_429_backoff_stops_lookup_promptly(monkeypatch):
+    from types import MappingProxyType
+
+    from app import jobs, songlookup
+
+    clock = [1000.0]
+    slept = []
+
+    def fake_sleep(s):
+        slept.append(s)
+        clock[0] += s
+
+    monkeypatch.setattr(songlookup.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(songlookup.time, "sleep", fake_sleep)
+
+    class Resp:
+        status_code = 429
+        headers = MappingProxyType({"Retry-After": "60"})
+        text = ""
+
+    class StubHttp:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url, params=None):
+            self.calls += 1
+            return Resp()
+
+        def close(self):
+            pass
+
+    class FakeCtx:
+        def check_cancelled(self):
+            if sum(slept) >= 1.0:  # user cancels about a second into the backoff
+                raise jobs.Cancelled()
+
+        def progress(self, *a, **k):
+            pass
+
+    ctx = FakeCtx()
+    client = songlookup.Client("key", "https://example.test", 1000, check_cancelled=ctx.check_cancelled)
+    client.http = StubHttp()
+    rows = [{"title": "Some Song", "artists": ["Some Artist"], "track_id": None}]
+    monkeypatch.setattr(songlookup.db, "get_lookups", lambda keys: {})
+    with pytest.raises(jobs.Cancelled):
+        songlookup.run_lookup(rows, ctx, client=client)
+    assert client.http.calls == 1
+    assert all(s <= client.SLEEP_SLICE for s in slept)
+    assert sum(slept) < 2.0  # nowhere near the 60s Retry-After

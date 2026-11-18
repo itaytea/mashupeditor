@@ -15,15 +15,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import re
 import secrets
+import threading
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
 
 import httpx
 
 from . import config
+from .fsutil import atomic_write_text
 
 API = "https://api.spotify.com/v1"
 AUTH_URL = "https://accounts.spotify.com/authorize"
@@ -34,6 +37,7 @@ _PLAYLIST_ID = re.compile(r"(?:playlist[/:])([A-Za-z0-9]{22})")
 _BARE_ID = re.compile(r"^[A-Za-z0-9]{22}$")
 
 _pending: dict[str, tuple[str, float]] = {}  # state -> (code_verifier, created)
+_pending_lock = threading.Lock()
 
 
 class SpotifyError(RuntimeError):
@@ -70,10 +74,7 @@ def _load_user_token() -> dict | None:
 def _save_user_token(tok: dict) -> None:
     config.ensure_dirs()
     path = _token_file()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(tok))
-    path.chmod(0o600)  # also tighten a pre-existing file
+    atomic_write_text(path, json.dumps(tok), mode=0o600)
 
 
 def is_connected() -> bool:
@@ -98,10 +99,11 @@ def login_url() -> str:
     ).rstrip(b"=").decode()
     state = secrets.token_urlsafe(16)
     now = time.time()
-    for s, (_, created) in list(_pending.items()):
-        if now - created > 600:
-            del _pending[s]
-    _pending[state] = (verifier, now)
+    with _pending_lock:
+        for s, (_, created) in list(_pending.items()):
+            if now - created > 600:
+                del _pending[s]
+        _pending[state] = (verifier, now)
     return AUTH_URL + "?" + urlencode({
         "client_id": config.SPOTIFY_CLIENT_ID,
         "response_type": "code",
@@ -129,7 +131,8 @@ def _token_request(client: httpx.Client, data: dict) -> dict:
 
 def finish_login(code: str, state: str) -> str:
     """Exchange the callback code for tokens. Returns the user's display name."""
-    pending = _pending.pop(state, None)
+    with _pending_lock:
+        pending = _pending.pop(state, None)
     if not pending:
         raise SpotifyError("Login expired or was started elsewhere; try again")
     with httpx.Client(timeout=20) as client:
@@ -177,13 +180,40 @@ def _access_token(client: httpx.Client) -> str:
 
 # --- playlist fetch ----------------------------------------------------------
 
+MAX_429_RETRIES = 3
+RETRY_AFTER_DEFAULT_S = 2.0
+RETRY_AFTER_MAX_S = 30.0
+
+
+def _retry_delay(value: str | None) -> float:
+    """Seconds to wait for a Retry-After header: integer seconds or an HTTP
+    date. Falls back to a short default when missing or unparseable."""
+    delay = RETRY_AFTER_DEFAULT_S
+    if value:
+        value = value.strip()
+        try:
+            delay = float(int(value))
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(value)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                delay = (when - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, IndexError):
+                delay = RETRY_AFTER_DEFAULT_S
+    return max(0.0, min(delay, RETRY_AFTER_MAX_S))
+
+
 def _get(client: httpx.Client, url: str, params: dict | None = None) -> dict:
-    r = client.get(
-        url, params=params, headers={"Authorization": f"Bearer {_access_token(client)}"}
-    )
-    if r.status_code == 429:
-        time.sleep(min(int(r.headers.get("Retry-After", "2")), 30))
-        return _get(client, url, params)
+    for attempt in range(MAX_429_RETRIES + 1):
+        r = client.get(
+            url, params=params, headers={"Authorization": f"Bearer {_access_token(client)}"}
+        )
+        if r.status_code != 429:
+            break
+        if attempt == MAX_429_RETRIES:
+            raise SpotifyError("Spotify is rate limiting requests (429); try again in a minute")
+        time.sleep(_retry_delay(r.headers.get("Retry-After")))
     if r.status_code == 401:
         raise SpotifyError("Spotify rejected the login; click Connect Spotify again")
     if r.status_code == 403:
