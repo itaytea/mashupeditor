@@ -310,13 +310,21 @@ def get_job(job_id: str) -> dict | None:
     return _job_row(row) if row else None
 
 
-def list_jobs(kind: str | None = None, limit: int = 50) -> list[dict]:
+def list_jobs(kind: str | None = None, limit: int | None = 50) -> list[dict]:
+    """Newest first. limit=None returns every matching row."""
+    sql, args = "SELECT * FROM jobs", []
+    if kind:
+        sql += " WHERE kind=?"
+        args.append(kind)
+    sql += " ORDER BY created_at DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        args.append(limit)
     with cursor() as c:
-        if kind:
-            c.execute(
-                "SELECT * FROM jobs WHERE kind=? ORDER BY created_at DESC LIMIT ?",
-                (kind, limit),
-            )
-        else:
-            c.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,))
+        c.execute(sql, args)
         return [_job_row(r) for r in c.fetchall()]
+
+
+def delete_job(job_id: str) -> None:
+    with cursor() as c:
+        c.execute("DELETE FROM jobs WHERE id=?", (job_id,))

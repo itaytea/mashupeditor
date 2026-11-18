@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -378,8 +379,24 @@ def create_draft(req: DraftRequest) -> dict:
 
 @app.get("/api/drafts")
 def list_drafts() -> list[dict]:
-    return [j["result"] for j in db.list_jobs("draft", limit=100)
+    return [j["result"] for j in db.list_jobs("draft", limit=None)
             if j["status"] == "done" and j["result"]]
+
+
+@app.delete("/api/drafts/{draft_id}")
+def delete_draft(draft_id: str) -> dict:
+    root = config.DRAFTS_DIR.resolve()
+    folder = (root / draft_id).resolve()
+    if folder.parent != root:  # rejects "..", separators, absolute paths
+        raise HTTPException(404)
+    rows = [j for j in db.list_jobs("draft", limit=None)
+            if (j["result"] or {}).get("draft_id") == draft_id]
+    if not folder.is_dir() and not rows:
+        raise HTTPException(404)
+    shutil.rmtree(folder, ignore_errors=True)
+    for j in rows:
+        db.delete_job(j["id"])
+    return {"deleted": draft_id}
 
 
 @app.get("/api/drafts/{draft_id}/{filename}")
