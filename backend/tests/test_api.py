@@ -54,6 +54,58 @@ def test_library_lists_only_existing_files(client, tmp_path):
     assert titles == ["Alpha"]
 
 
+def test_library_existence_is_cached_within_ttl(client, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    add_track(tmp_path, "Alpha")
+    add_track(tmp_path, "Beta")
+    calls = []
+    real_exists = Path.exists
+
+    def counting(self, *a, **k):
+        if self.suffix == ".mp3":
+            calls.append(str(self))
+        return real_exists(self, *a, **k)
+
+    monkeypatch.setattr(Path, "exists", counting)
+    assert len(client.get("/api/library").json()) == 2
+    assert len(calls) == 2
+    assert len(client.get("/api/library").json()) == 2
+    assert len(calls) == 2  # served from the cache
+
+
+def test_library_existence_cache_expires_and_invalidates(client, tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(main.time, "monotonic", lambda: clock[0])
+    add_track(tmp_path, "Alpha")
+    assert len(client.get("/api/library").json()) == 1
+
+    (tmp_path / "Alpha.mp3").unlink()
+    assert len(client.get("/api/library").json()) == 1  # still cached
+    clock[0] += main.EXISTS_TTL + 1
+    assert client.get("/api/library").json() == []  # TTL elapsed, re-checked
+
+    (tmp_path / "Alpha.mp3").write_bytes(b"x")
+    assert client.get("/api/library").json() == []  # cached "missing"
+    main._invalidate_exists_cache()
+    assert len(client.get("/api/library").json()) == 1
+
+
+def test_scan_invalidates_existence_cache(client, tmp_path, monkeypatch):
+    music = tmp_path / "music"
+    music.mkdir()
+    (music / "Artist - a.mp3").write_bytes(b"x")
+    monkeypatch.setattr(analysis, "analyze_file", lambda path: {
+        "duration": 100.0, "bpm": 124.0, "key_pc": 9, "mode": "minor",
+        "key_name": "A minor", "camelot": "8A", "key_confidence": 0.8,
+    })
+    # Prime the cache with a stale "missing" answer for the file the scan will add.
+    main._exists_cache[str((music / "Artist - a.mp3"))] = (main.time.monotonic(), False)
+    job = client.post("/api/library/scan", json={"folder": str(music)}).json()["job_id"]
+    assert wait_job(client, job)["status"] == "done"
+    assert len(client.get("/api/library").json()) == 1
+
+
 def test_scan_rejects_missing_folder(client, tmp_path):
     r = client.post("/api/library/scan", json={"folder": str(tmp_path / "nope")})
     assert r.status_code == 400
@@ -222,7 +274,7 @@ def test_pairs_library_scope_and_filters(client, tmp_path):
     focused = client.get("/api/pairs", params={"scope": "library", "focus": f"t{a}"}).json()
     assert focused["pairs"] and all(f"t{a}" in (p["a"], p["b"]) for p in focused["pairs"])
 
-    high = client.get("/api/pairs", params={"scope": "library", "min_score": 10000}).json()
+    high = client.get("/api/pairs", params={"scope": "library", "min_score": 1.0}).json()
     assert high["pairs"] == []
 
 
@@ -353,3 +405,15 @@ def test_find_reuses_running_job(client, playlist, tmp_path):
     assert r.status_code == 200
     assert r.json()["job_id"] == "find-existing"
     assert len(db.list_jobs("find", 10)) == 1
+
+
+@pytest.mark.parametrize("params", [
+    {"limit": -1}, {"limit": 0}, {"limit": 1001},
+    {"min_score": -0.1}, {"min_score": 1.5},
+])
+def test_pairs_rejects_out_of_range_params(client, params):
+    assert client.get("/api/pairs", params=params).status_code == 422
+
+
+def test_pairs_accepts_boundary_params(client):
+    assert client.get("/api/pairs", params={"limit": 1000, "min_score": 1.0}).status_code == 200

@@ -15,15 +15,16 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import re
 import secrets
+import threading
 import time
 from urllib.parse import urlencode
 
 import httpx
 
 from . import config
+from .fsutil import atomic_write_text
 
 API = "https://api.spotify.com/v1"
 AUTH_URL = "https://accounts.spotify.com/authorize"
@@ -34,6 +35,7 @@ _PLAYLIST_ID = re.compile(r"(?:playlist[/:])([A-Za-z0-9]{22})")
 _BARE_ID = re.compile(r"^[A-Za-z0-9]{22}$")
 
 _pending: dict[str, tuple[str, float]] = {}  # state -> (code_verifier, created)
+_pending_lock = threading.Lock()
 
 
 class SpotifyError(RuntimeError):
@@ -70,10 +72,7 @@ def _load_user_token() -> dict | None:
 def _save_user_token(tok: dict) -> None:
     config.ensure_dirs()
     path = _token_file()
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(tok))
-    path.chmod(0o600)  # also tighten a pre-existing file
+    atomic_write_text(path, json.dumps(tok), mode=0o600)
 
 
 def is_connected() -> bool:
@@ -98,10 +97,11 @@ def login_url() -> str:
     ).rstrip(b"=").decode()
     state = secrets.token_urlsafe(16)
     now = time.time()
-    for s, (_, created) in list(_pending.items()):
-        if now - created > 600:
-            del _pending[s]
-    _pending[state] = (verifier, now)
+    with _pending_lock:
+        for s, (_, created) in list(_pending.items()):
+            if now - created > 600:
+                del _pending[s]
+        _pending[state] = (verifier, now)
     return AUTH_URL + "?" + urlencode({
         "client_id": config.SPOTIFY_CLIENT_ID,
         "response_type": "code",
@@ -129,7 +129,8 @@ def _token_request(client: httpx.Client, data: dict) -> dict:
 
 def finish_login(code: str, state: str) -> str:
     """Exchange the callback code for tokens. Returns the user's display name."""
-    pending = _pending.pop(state, None)
+    with _pending_lock:
+        pending = _pending.pop(state, None)
     if not pending:
         raise SpotifyError("Login expired or was started elsewhere; try again")
     with httpx.Client(timeout=20) as client:

@@ -107,7 +107,8 @@ Work in progress. What works and what doesn't yet:
 
 ## Setup
 
-Requirements: Python 3.11+ (3.12 tested), Node 20+, `ffmpeg`, and ideally
+Requirements: Python 3.11-3.13 (CI runs 3.12; dependency resolution is
+checked on 3.13), Node 20+, `ffmpeg`, and ideally
 Rubber Band:
 
 ```bash
@@ -122,7 +123,7 @@ which sounds much rougher, and the UI shows a warning.
 ```bash
 cd backend
 python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt   # runtime only (pins torch/torchaudio 2.5.1)
+.venv/bin/pip install -r requirements.txt   # runtime only (torch/torchaudio >=2.5.1,<2.9)
 cp .env.example .env   # then add your Spotify credentials
 .venv/bin/uvicorn app.main:app --reload --port 8000
 ```
