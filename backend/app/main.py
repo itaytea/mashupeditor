@@ -62,7 +62,7 @@ app = FastAPI(title="Mashup Maker", lifespan=lifespan)
 # (blocks DNS-rebinding). Override with MASHUP_ALLOWED_HOSTS=host1,host2.
 ALLOWED_HOSTS = [
     h.strip()
-    for h in os.environ.get("MASHUP_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver").split(",")
+    for h in os.environ.get("MASHUP_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]").split(",")
     if h.strip()
 ]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)

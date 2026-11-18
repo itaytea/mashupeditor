@@ -1,8 +1,13 @@
 """Shared fixtures: an isolated data dir / SQLite DB and a FastAPI TestClient."""
 
-import pytest
+import os
 
-from app import config, db
+# Must be set before the app is imported; TestClient uses Host "testserver".
+os.environ.setdefault("MASHUP_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1],testserver")
+
+import pytest  # noqa: E402
+
+from app import config, db  # noqa: E402
 
 
 @pytest.fixture
