@@ -76,3 +76,14 @@ def test_progress_cancel_checks_are_throttled(temp_db, monkeypatch):
     for i in range(100):
         ctx.progress(i / 100)
     assert len(reads) == 1
+
+
+def test_progress_rechecks_cancel_after_interval(temp_db, monkeypatch):
+    ctx, reads, now = _throttle_setup(monkeypatch, "j3")
+    for i in range(50):
+        ctx.progress(i / 100)
+    assert len(reads) == 1
+    now[0] += ctx.CANCEL_CHECK_INTERVAL
+    for i in range(50):
+        ctx.progress(i / 100)
+    assert len(reads) == 2
