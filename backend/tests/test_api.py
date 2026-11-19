@@ -357,6 +357,20 @@ def test_delete_draft_removes_files_and_job(client, data_dir):
     assert client.delete("/api/drafts/abc").status_code == 404
 
 
+def test_delete_draft_keeps_rows_when_file_removal_fails(client, data_dir, monkeypatch):
+    _make_draft("abc", "j1")
+
+    def boom(*a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(main.shutil, "rmtree", boom)
+    r = client.delete("/api/drafts/abc")
+    assert r.status_code == 500
+    assert "Permission denied" in r.json()["detail"]
+    assert db.get_job("j1") is not None
+    assert [x["draft_id"] for x in client.get("/api/drafts").json()] == ["abc"]
+
+
 def test_delete_draft_unknown_and_traversal(client, data_dir):
     config.DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
     outside = data_dir / "precious"
