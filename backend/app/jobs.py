@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 import traceback
 import uuid
@@ -27,6 +28,7 @@ _executors = {
     "net": ThreadPoolExecutor(max_workers=1, thread_name_prefix="mashup-net"),
 }
 
+_unique_lock = threading.Lock()
 
 _SECRET = re.compile(r"((?:api_key|access_token|client_secret)=)[^&\s'\"]+", re.IGNORECASE)
 
@@ -97,6 +99,20 @@ def submit(kind: str, params: dict, fn: Callable[[JobContext], Any], queue: str 
 
     _executors[queue].submit(run)
     return job_id
+
+
+def submit_unique(kind: str, params: dict, fn: Callable[[JobContext], Any],
+                  queue: str = "heavy",
+                  match: Callable[[dict], bool] | None = None) -> tuple[str, bool]:
+    """Like submit(), but reuse a queued/running job of `kind` that `match`es.
+
+    The check and the submit happen under one lock, so concurrent requests
+    can't both start the same job. Returns (job_id, started)."""
+    with _unique_lock:
+        for job in db.list_jobs(kind, limit=None):
+            if job["status"] in ("queued", "running") and (match is None or match(job["params"])):
+                return job["id"], False
+        return submit(kind, params, fn, queue), True
 
 
 def cancel(job_id: str) -> bool:
