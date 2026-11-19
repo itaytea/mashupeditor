@@ -74,6 +74,7 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 # path -> (checked_at, exists). Avoids a stat() per library row on every request;
 # cleared after scans/finds, which are what add or move files.
 EXISTS_TTL = 30.0
+EXISTS_MAX = 20000
 _exists_cache: dict[str, tuple[float, bool]] = {}
 _exists_lock = threading.Lock()
 
@@ -86,6 +87,11 @@ def _path_exists(path: str) -> bool:
             return hit[1]
     found = Path(path).exists()
     with _exists_lock:
+        if path not in _exists_cache and len(_exists_cache) >= EXISTS_MAX:
+            for k in [k for k, v in _exists_cache.items() if now - v[0] >= EXISTS_TTL]:
+                del _exists_cache[k]
+            if len(_exists_cache) >= EXISTS_MAX:
+                _exists_cache.clear()
         _exists_cache[path] = (now, found)
     return found
 
@@ -366,6 +372,11 @@ def create_draft(req: DraftRequest) -> dict:
     if req.vocals_id == req.instrumental_id:
         raise HTTPException(400, "pick two different tracks")
     a, b = _track_or_404(req.vocals_id), _track_or_404(req.instrumental_id)
+    for t in (a, b):
+        # Bypass the cache: a stale "exists" must not start a doomed render.
+        if not Path(t["path"]).exists():
+            _invalidate_exists_cache()
+            raise HTTPException(409, f"file for track {t['id']} is missing")
 
     def work(ctx: jobs.JobContext) -> dict:
         return render.render_draft(

@@ -457,3 +457,21 @@ def test_pairs_rejects_out_of_range_params(client, params):
 
 def test_pairs_accepts_boundary_params(client):
     assert client.get("/api/pairs", params={"limit": 1000, "min_score": 1.0}).status_code == 200
+
+
+def test_existence_cache_is_bounded(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "EXISTS_MAX", 5)
+    main._invalidate_exists_cache()
+    for i in range(23):
+        main._path_exists(str(tmp_path / f"missing{i}.mp3"))
+        assert len(main._exists_cache) <= 5
+
+
+def test_create_draft_rejects_missing_file_despite_cache(client, tmp_path):
+    a = add_track(tmp_path, "Alpha")
+    b = add_track(tmp_path, "Beta")
+    assert len(client.get("/api/library").json()) == 2  # primes the cache
+    (tmp_path / "Alpha.mp3").unlink()
+    r = client.post("/api/drafts", json={"vocals_id": a, "instrumental_id": b})
+    assert r.status_code == 409
+    assert str(a) in r.json()["detail"]
