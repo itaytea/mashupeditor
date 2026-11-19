@@ -393,7 +393,12 @@ def delete_draft(draft_id: str) -> dict:
             if (j["result"] or {}).get("draft_id") == draft_id]
     if not folder.is_dir() and not rows:
         raise HTTPException(404)
-    shutil.rmtree(folder, ignore_errors=True)
+    if folder.is_dir():
+        try:
+            shutil.rmtree(folder)
+        except OSError as e:
+            logging.getLogger(__name__).error("Couldn't delete draft %s: %s", draft_id, e)
+            raise HTTPException(500, f"Couldn't delete draft files: {e.strerror or e}")
     for j in rows:
         db.delete_job(j["id"])
     return {"deleted": draft_id}
