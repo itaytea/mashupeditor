@@ -1,5 +1,6 @@
 """HTTP-level tests of the FastAPI app with Spotify and audio analysis stubbed."""
 
+import threading
 import time
 
 import pytest
@@ -445,6 +446,32 @@ def test_find_reuses_running_job(client, playlist, tmp_path):
     assert r.status_code == 200
     assert r.json()["job_id"] == "find-existing"
     assert len(db.list_jobs("find", 10)) == 1
+
+
+def test_find_on_other_folder_starts_new_job(client, playlist, tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    db.create_job("find-a", "find", {"folder": str(a), "title": "Find in a"})
+    r = client.post("/api/find", json={"folder": str(b)})
+    assert r.status_code == 200
+    assert r.json()["job_id"] != "find-a"
+    assert len(db.list_jobs("find", 10)) == 2
+
+
+def test_scan_same_folder_twice_returns_same_job(client, tmp_path, monkeypatch):
+    music = tmp_path / "music"
+    music.mkdir()
+    release = threading.Event()
+    monkeypatch.setattr(analysis, "scan_folder",
+                        lambda folder, progress: release.wait(5) and {})
+    first = client.post("/api/library/scan", json={"folder": str(music)}).json()["job_id"]
+    second = client.post("/api/library/scan", json={"folder": str(music)}).json()["job_id"]
+    release.set()
+    assert first == second
+    assert len(db.list_jobs("scan", 10)) == 1
+    wait_job(client, first)
 
 
 @pytest.mark.parametrize("params", [
