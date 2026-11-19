@@ -87,3 +87,30 @@ def test_progress_rechecks_cancel_after_interval(temp_db, monkeypatch):
     for i in range(50):
         ctx.progress(i / 100)
     assert len(reads) == 2
+
+
+def test_submit_unique_from_two_threads_starts_one_job(temp_db):
+    release = threading.Event()
+    started = threading.Barrier(2)
+    results = []
+
+    def fn(ctx):
+        release.wait(5)
+        return {}
+
+    def go():
+        started.wait()
+        results.append(jobs.submit_unique("scan", {"folder": "/x"}, fn,
+                                          match=lambda p: p.get("folder") == "/x"))
+
+    threads = [threading.Thread(target=go) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    release.set()
+    assert len(results) == 2
+    assert results[0][0] == results[1][0]
+    assert sorted(r[1] for r in results) == [False, True]
+    assert len(db.list_jobs("scan")) == 1
+    _wait(results[0][0])

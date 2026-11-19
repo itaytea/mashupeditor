@@ -24,7 +24,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 # httpx logs every request URL at INFO, which would print API keys.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-def _start_find(folder: Path, files: list[Path] | None = None) -> str | None:
+def _start_find(folder: Path, files: list[Path] | None = None,
+                unique: bool = False) -> str | None:
     """Start a FIND job: look for unowned playlist tracks among files in `folder`."""
     pl = db.get_playlist()
     wanted = [r for r in pl["tracks"] if not r["track_id"]] if pl else []
@@ -42,8 +43,14 @@ def _start_find(folder: Path, files: list[Path] | None = None) -> str | None:
             _rematch_playlist()
         return stats
 
-    return jobs.submit("find", {"folder": str(folder), "files": len(files) if files else None,
-                                "title": f"Find in {folder.name}"}, work)
+    params = {"folder": str(folder), "files": len(files) if files else None,
+              "title": f"Find in {folder.name}"}
+    if unique:
+        # Only a whole-folder find for this same folder counts as a duplicate.
+        return jobs.submit_unique(
+            "find", params, work,
+            match=lambda p: p.get("folder") == str(folder) and p.get("files") is None)[0]
+    return jobs.submit("find", params, work)
 
 
 _watcher = watcher.FolderWatcher(_start_find)
@@ -151,9 +158,6 @@ def scan_library(req: ScanRequest) -> dict:
     if not folder.is_dir():
         raise HTTPException(400, f"Not a folder: {folder}")
     resolved = str(folder.resolve())
-    for j in db.list_jobs("scan", 5):
-        if j["status"] in ("queued", "running") and j["params"].get("folder") == resolved:
-            return {"job_id": j["id"]}
     settings.update(music_dir=resolved)
 
     def work(ctx: jobs.JobContext) -> dict:
@@ -164,7 +168,10 @@ def scan_library(req: ScanRequest) -> dict:
         _rematch_playlist()
         return stats
 
-    return {"job_id": jobs.submit("scan", {"folder": resolved, "title": f"Scan {folder.name}"}, work)}
+    job_id, _ = jobs.submit_unique(
+        "scan", {"folder": resolved, "title": f"Scan {folder.name}"}, work,
+        match=lambda p: p.get("folder") == resolved)
+    return {"job_id": job_id}
 
 
 @app.get("/api/library")
@@ -190,10 +197,7 @@ def find_tracks(req: FindRequest) -> dict:
     settings.update(**changes)
     if not db.get_playlist():
         raise HTTPException(400, "Load a Spotify playlist first, so there's something to look for")
-    running = [j for j in db.list_jobs("find", 5) if j["status"] in ("queued", "running")]
-    if running:
-        return {"job_id": running[0]["id"]}
-    job_id = _start_find(folder)
+    job_id = _start_find(folder, unique=True)
     if job_id is None:
         raise HTTPException(400, "You already have every playlist track")
     return {"job_id": job_id}
@@ -340,14 +344,12 @@ def start_lookup() -> dict:
     pl = db.get_playlist()
     if not pl:
         raise HTTPException(400, "Load a Spotify playlist first")
-    running = [j for j in db.list_jobs("lookup", 5) if j["status"] in ("queued", "running")]
-    if running:
-        return {"job_id": running[0]["id"]}
     rows = pl["tracks"]
-    return {"job_id": jobs.submit(
+    job_id, _ = jobs.submit_unique(
         "lookup", {"title": f"Key/BPM lookup: {pl['name']}"},
         lambda ctx: songlookup.run_lookup(rows, ctx), queue="net",
-    )}
+    )
+    return {"job_id": job_id}
 
 
 # --- drafts -----------------------------------------------------------------
