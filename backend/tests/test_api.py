@@ -456,8 +456,11 @@ def test_find_on_other_folder_starts_new_job(client, playlist, tmp_path):
     db.create_job("find-a", "find", {"folder": str(a), "title": "Find in a"})
     r = client.post("/api/find", json={"folder": str(b)})
     assert r.status_code == 200
-    assert r.json()["job_id"] != "find-a"
+    new_id = r.json()["job_id"]
+    assert new_id != "find-a"
     assert len(db.list_jobs("find", 10)) == 2
+    # Let the started job finish before the fixture closes the db.
+    wait_job(client, new_id)
 
 
 def test_scan_same_folder_twice_returns_same_job(client, tmp_path, monkeypatch):
