@@ -17,7 +17,7 @@ def test_score_title_and_artist():
     assert wrong_artist < good
 
 
-def test_match_playlist_greedy_unique():
+def test_match_playlist_one_to_one():
     playlist = [
         {"title": "Get Lucky", "artists": ["Daft Punk"]},
         {"title": "Around the World", "artists": ["Daft Punk"]},
