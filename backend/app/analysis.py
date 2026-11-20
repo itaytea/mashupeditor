@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
+import os
 import re
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -178,19 +181,24 @@ def find_audio_files(folder: Path) -> list[Path]:
 ProgressFn = Callable[[float, str], None]
 
 
-def analyze_path(path: Path, title: str | None = None, artist: str | None = None) -> str:
-    """Analyse one file into the cache. Returns "cached", "analyzed" or "failed"
-    (also "failed", without retrying, for an unchanged file that failed recently)."""
+def compute_record(
+    path: Path, title: str | None = None, artist: str | None = None
+) -> tuple[str, dict | None]:
+    """Analyse one file without writing to the DB. Returns (status, record):
+    status is "cached", "analyzed" or "failed" (also "failed", without retrying,
+    for an unchanged file that failed recently); record is the row to upsert,
+    or None when there is nothing to write. Picklable and DB-write-free, so it
+    can run in a worker process."""
     try:
         st = path.stat()
     except OSError as e:  # file vanished or became unreadable mid-scan
         log.warning("could not stat %s: %s", path, e)
-        return "failed"
+        return "failed", None
     hit = db.get_cached_track(str(path), st.st_mtime, st.st_size, ANALYSIS_VERSION)
     if hit:
         # A recent cached error is a known-bad file: count it as failed, don't
         # retry (get_cached_track returns None once the failure TTL has passed).
-        return "failed" if hit.get("error") else "cached"
+        return ("failed" if hit.get("error") else "cached"), None
     if title is None:
         title, artist = read_metadata(path)
     rec: dict = {
@@ -205,7 +213,14 @@ def analyze_path(path: Path, title: str | None = None, artist: str | None = None
         log.warning("analysis failed for %s: %s", path, e)
         rec["error"] = str(e)[:500]
         status = "failed"
-    db.upsert_track(rec)
+    return status, rec
+
+
+def analyze_path(path: Path, title: str | None = None, artist: str | None = None) -> str:
+    """Analyse one file into the cache. Returns "cached", "analyzed" or "failed"."""
+    status, rec = compute_record(path, title, artist)
+    if rec is not None:
+        db.upsert_track(rec)
     return status
 
 
@@ -216,15 +231,56 @@ def _resolve_folder(folder: Path) -> Path:
     return folder
 
 
-def scan_folder(folder: Path, progress: ProgressFn | None = None) -> dict:
+def scan_workers(n_files: int | None = None) -> int:
+    """Worker processes for a scan: MASHUP_SCAN_WORKERS, default cpu_count - 1
+    (at least 1), never more than the number of files."""
+    default = max(1, (os.cpu_count() or 2) - 1)
+    try:
+        n = int(os.environ.get("MASHUP_SCAN_WORKERS", default))
+    except ValueError:
+        n = default
+    n = max(1, n)
+    return min(n, n_files) if n_files else n
+
+
+def _record_result(status: str, rec: dict | None, stats: dict) -> None:
+    # Only the parent process writes to the DB.
+    if rec is not None:
+        db.upsert_track(rec)
+    stats[status] += 1
+
+
+def scan_folder(
+    folder: Path, progress: ProgressFn | None = None, workers: int | None = None
+) -> dict:
     """Analyse every audio file in `folder`, reusing cached results for files
-    whose path, size and mtime are unchanged."""
+    whose path, size and mtime are unchanged. Files are analysed in a process
+    pool (see scan_workers); results are written to the DB, and progress is
+    reported, by the calling process only."""
     files = find_audio_files(_resolve_folder(folder))
     stats = {"total": len(files), "cached": 0, "analyzed": 0, "failed": 0}
-    for i, path in enumerate(files):
+    workers = scan_workers(len(files)) if workers is None else max(1, workers)
+
+    def report(i: int, path: Path) -> None:
         if progress:
             progress(i / max(len(files), 1), f"{i + 1}/{len(files)}: {path.name}")
-        stats[analyze_path(path)] += 1
+
+    if workers == 1:
+        for i, path in enumerate(files):
+            report(i, path)
+            _record_result(*compute_record(path), stats)
+    else:
+        # "spawn": the scan runs in a job thread, where forking is unsafe, and
+        # workers must not inherit the parent's SQLite connection.
+        ctx = multiprocessing.get_context("spawn")
+        pool = ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
+        try:
+            futures = [pool.submit(compute_record, p) for p in files]
+            for i, (path, fut) in enumerate(zip(files, futures)):
+                report(i, path)  # may raise to cancel the scan
+                _record_result(*fut.result(), stats)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
 
     if progress:
         progress(1.0, f"Done: {stats['analyzed']} analysed, {stats['cached']} cached, "

@@ -4,6 +4,9 @@ import os
 
 # Must be set before the app is imported; TestClient uses Host "testserver".
 os.environ.setdefault("MASHUP_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1],testserver")
+# Scan inline by default: tests monkeypatch analysis functions, which spawned
+# worker processes would not see. Pool tests set MASHUP_SCAN_WORKERS themselves.
+os.environ.setdefault("MASHUP_SCAN_WORKERS", "1")
 
 import pytest  # noqa: E402
 
