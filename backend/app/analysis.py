@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing
+import os
 import re
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -228,15 +231,56 @@ def _resolve_folder(folder: Path) -> Path:
     return folder
 
 
-def scan_folder(folder: Path, progress: ProgressFn | None = None) -> dict:
+def scan_workers(n_files: int | None = None) -> int:
+    """Worker processes for a scan: MASHUP_SCAN_WORKERS, default cpu_count - 1
+    (at least 1), never more than the number of files."""
+    default = max(1, (os.cpu_count() or 2) - 1)
+    try:
+        n = int(os.environ.get("MASHUP_SCAN_WORKERS", default))
+    except ValueError:
+        n = default
+    n = max(1, n)
+    return min(n, n_files) if n_files else n
+
+
+def _record_result(status: str, rec: dict | None, stats: dict) -> None:
+    # Only the parent process writes to the DB.
+    if rec is not None:
+        db.upsert_track(rec)
+    stats[status] += 1
+
+
+def scan_folder(
+    folder: Path, progress: ProgressFn | None = None, workers: int | None = None
+) -> dict:
     """Analyse every audio file in `folder`, reusing cached results for files
-    whose path, size and mtime are unchanged."""
+    whose path, size and mtime are unchanged. Files are analysed in a process
+    pool (see scan_workers); results are written to the DB, and progress is
+    reported, by the calling process only."""
     files = find_audio_files(_resolve_folder(folder))
     stats = {"total": len(files), "cached": 0, "analyzed": 0, "failed": 0}
-    for i, path in enumerate(files):
+    workers = scan_workers(len(files)) if workers is None else max(1, workers)
+
+    def report(i: int, path: Path) -> None:
         if progress:
             progress(i / max(len(files), 1), f"{i + 1}/{len(files)}: {path.name}")
-        stats[analyze_path(path)] += 1
+
+    if workers == 1:
+        for i, path in enumerate(files):
+            report(i, path)
+            _record_result(*compute_record(path), stats)
+    else:
+        # "spawn": the scan runs in a job thread, where forking is unsafe, and
+        # workers must not inherit the parent's SQLite connection.
+        ctx = multiprocessing.get_context("spawn")
+        pool = ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
+        try:
+            futures = [pool.submit(compute_record, p) for p in files]
+            for i, (path, fut) in enumerate(zip(files, futures)):
+                report(i, path)  # may raise to cancel the scan
+                _record_result(*fut.result(), stats)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
 
     if progress:
         progress(1.0, f"Done: {stats['analyzed']} analysed, {stats['cached']} cached, "
