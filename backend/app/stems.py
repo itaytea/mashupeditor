@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import logging
 import threading
 import types
@@ -69,13 +70,39 @@ def _can_fall_back(device: str) -> bool:
     )
 
 
+@contextlib.contextmanager
+def _torch_load_weights_only_false():
+    """Temporarily make torch.load default to weights_only=False.
+
+    Since torch 2.6 torch.load defaults to weights_only=True, which rejects the
+    pickled objects inside demucs' htdemucs checkpoint. The checkpoints are
+    fetched by demucs from its official source, so we trust them. The patch is
+    scoped to the model load only and always restored. An explicit
+    weights_only argument from the caller is respected.
+    """
+    import torch
+
+    original = torch.load
+
+    def _load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return original(*args, **kwargs)
+
+    torch.load = _load
+    try:
+        yield
+    finally:
+        torch.load = original
+
+
 def _get_model():
     global _model
     with _model_lock:
         if _model is None:
             from demucs.pretrained import get_model
 
-            _model = get_model(config.DEMUCS_MODEL)
+            with _torch_load_weights_only_false():
+                _model = get_model(config.DEMUCS_MODEL)
             _model.eval()
         return _model
 
