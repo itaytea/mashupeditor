@@ -178,19 +178,24 @@ def find_audio_files(folder: Path) -> list[Path]:
 ProgressFn = Callable[[float, str], None]
 
 
-def analyze_path(path: Path, title: str | None = None, artist: str | None = None) -> str:
-    """Analyse one file into the cache. Returns "cached", "analyzed" or "failed"
-    (also "failed", without retrying, for an unchanged file that failed recently)."""
+def compute_record(
+    path: Path, title: str | None = None, artist: str | None = None
+) -> tuple[str, dict | None]:
+    """Analyse one file without writing to the DB. Returns (status, record):
+    status is "cached", "analyzed" or "failed" (also "failed", without retrying,
+    for an unchanged file that failed recently); record is the row to upsert,
+    or None when there is nothing to write. Picklable and DB-write-free, so it
+    can run in a worker process."""
     try:
         st = path.stat()
     except OSError as e:  # file vanished or became unreadable mid-scan
         log.warning("could not stat %s: %s", path, e)
-        return "failed"
+        return "failed", None
     hit = db.get_cached_track(str(path), st.st_mtime, st.st_size, ANALYSIS_VERSION)
     if hit:
         # A recent cached error is a known-bad file: count it as failed, don't
         # retry (get_cached_track returns None once the failure TTL has passed).
-        return "failed" if hit.get("error") else "cached"
+        return ("failed" if hit.get("error") else "cached"), None
     if title is None:
         title, artist = read_metadata(path)
     rec: dict = {
@@ -205,7 +210,14 @@ def analyze_path(path: Path, title: str | None = None, artist: str | None = None
         log.warning("analysis failed for %s: %s", path, e)
         rec["error"] = str(e)[:500]
         status = "failed"
-    db.upsert_track(rec)
+    return status, rec
+
+
+def analyze_path(path: Path, title: str | None = None, artist: str | None = None) -> str:
+    """Analyse one file into the cache. Returns "cached", "analyzed" or "failed"."""
+    status, rec = compute_record(path, title, artist)
+    if rec is not None:
+        db.upsert_track(rec)
     return status
 
 
