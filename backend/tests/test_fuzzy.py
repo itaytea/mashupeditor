@@ -17,7 +17,7 @@ def test_score_title_and_artist():
     assert wrong_artist < good
 
 
-def test_match_playlist_greedy_unique():
+def test_match_playlist_one_to_one():
     playlist = [
         {"title": "Get Lucky", "artists": ["Daft Punk"]},
         {"title": "Around the World", "artists": ["Daft Punk"]},
@@ -150,3 +150,19 @@ def test_normalized_scorers_edge_cases():
     assert _combine(100.0, None) == 90.0
     assert _combine(100.0, 59.0) == 0.0
     assert _combine(100.0, 100.0) == 100.0
+
+
+def test_match_playlist_large_sparse_candidates():
+    # Many independent one-to-one pairs plus one contested pair: the assignment
+    # must stay correct without building a dense rows x cols matrix.
+    n = 3000
+    playlist = [{"title": f"Song {i:05d} xq{i * 7919 % 100003}", "artists": [f"Artist{i:05d}"]}
+                for i in range(n)]
+    local = [{"id": i, "title": p["title"], "artist": p["artists"][0]}
+             for i, p in enumerate(playlist)]
+    playlist.append({"title": playlist[0]["title"], "artists": playlist[0]["artists"]})
+    res = match_playlist(playlist, local)
+    ids = [m.track_id for m in res if m.track_id is not None]
+    assert len(ids) == len(set(ids))
+    assert len(ids) == n  # the duplicate row loses out, everything else matches
+    assert all(res[i].track_id == i for i in range(1, n))

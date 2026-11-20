@@ -55,6 +55,15 @@ def make_data(n: int, rng: random.Random):
     return playlist, local
 
 
+def make_sparse_data(n: int):
+    """n distinct songs that each match only their own local file (many tiny components)."""
+    playlist = [{"title": f"Song {i:05d} xq{i * 7919 % 100003}", "artists": [f"Artist{i:05d}"]}
+                for i in range(n)]
+    local = [{"id": i, "title": p["title"], "artist": p["artists"][0]}
+             for i, p in enumerate(playlist)]
+    return playlist, local
+
+
 def timed(fn, *args):
     t0 = time.perf_counter()
     out = fn(*args)
@@ -71,6 +80,11 @@ def main(sizes: list[int]) -> None:
             matched = sum(m.track_id is not None for m in res)
             total = sum(m.score or 0 for m in res)
             print(f"{n:>8} {len(local):>8} {name:>7} {secs:>8.2f} {matched:>8} {total:>10.1f}")
+        playlist, local = make_sparse_data(n)
+        res, secs = timed(fuzzy.match_playlist, playlist, local)
+        matched = sum(m.track_id is not None for m in res)
+        total = sum(m.score or 0 for m in res)
+        print(f"{n:>8} {len(local):>8} {'sparse':>7} {secs:>8.2f} {matched:>8} {total:>10.1f}")
 
 
 if __name__ == "__main__":

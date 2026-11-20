@@ -9,10 +9,9 @@ from dataclasses import dataclass
 import numpy as np
 from rapidfuzz import fuzz, process
 
-try:  # scipy is a runtime dependency, but fall back to greedy if it is missing
-    from scipy.optimize import linear_sum_assignment
-except ImportError:  # pragma: no cover
-    linear_sum_assignment = None
+from scipy.optimize import linear_sum_assignment
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 MATCH_THRESHOLD = 75.0
 
@@ -151,28 +150,39 @@ def _candidate_scores(playlist: list[dict], local_norm: list[tuple[int, str, str
 
 
 def _assign(rows: np.ndarray, cols: np.ndarray, scores: np.ndarray) -> list[tuple[int, int, float]]:
-    """One-to-one assignment of candidate pairs maximizing the total score
-    (scipy), or greedily from the highest score when scipy is unavailable."""
+    """One-to-one assignment of candidate pairs maximizing the total score.
+
+    The candidate pairs form a bipartite graph. It is split into connected
+    components and each one is solved on its own with scipy's
+    linear_sum_assignment, so memory and time scale with the largest component
+    rather than with (rows with a candidate) x (columns with a candidate)."""
     if not len(scores):
         return []
-    if linear_sum_assignment is None:
-        out, used_r, used_c = [], set(), set()
-        for k in sorted(range(len(scores)), key=lambda k: (-scores[k], rows[k], cols[k])):
-            r, c = int(rows[k]), int(cols[k])
-            if r not in used_r and c not in used_c:
-                used_r.add(r)
-                used_c.add(c)
-                out.append((r, c, float(scores[k])))
-        return out
-    # Only rows/columns that have a candidate matter, which keeps the dense
-    # matrix small even for large libraries.
+    # Only rows/columns that have a candidate matter.
     ur, ri = np.unique(rows, return_inverse=True)
     uc, ci = np.unique(cols, return_inverse=True)
-    cost = np.zeros((len(ur), len(uc)))
-    cost[ri, ci] = scores
-    r_idx, c_idx = linear_sum_assignment(cost, maximize=True)
-    return [(int(ur[r]), int(uc[c]), float(cost[r, c]))
-            for r, c in zip(r_idx, c_idx) if cost[r, c] >= MATCH_THRESHOLD]
+    nr, nc = len(ur), len(uc)
+    graph = coo_matrix((np.ones(len(scores), dtype=np.int8), (ri, nr + ci)),
+                       shape=(nr + nc, nr + nc))
+    n_comp, labels = connected_components(graph, directed=False)
+    pair_comp = labels[ri]
+    order = np.argsort(pair_comp, kind="stable")
+    bounds = np.searchsorted(pair_comp[order], np.arange(n_comp + 1))
+    out: list[tuple[int, int, float]] = []
+    for k in range(n_comp):
+        idx = order[bounds[k]:bounds[k + 1]]
+        if len(idx) == 1:
+            if scores[idx[0]] >= MATCH_THRESHOLD:
+                out.append((int(rows[idx[0]]), int(cols[idx[0]]), float(scores[idx[0]])))
+            continue
+        cr, cri = np.unique(ri[idx], return_inverse=True)
+        cc, cci = np.unique(ci[idx], return_inverse=True)
+        cost = np.zeros((len(cr), len(cc)))
+        cost[cri, cci] = scores[idx]
+        r_idx, c_idx = linear_sum_assignment(cost, maximize=True)
+        out.extend((int(ur[cr[r]]), int(uc[cc[c]]), float(cost[r, c]))
+                   for r, c in zip(r_idx, c_idx) if cost[r, c] >= MATCH_THRESHOLD)
+    return out
 
 
 def match_playlist(playlist: list[dict], local: list[dict]) -> list[Match]:
