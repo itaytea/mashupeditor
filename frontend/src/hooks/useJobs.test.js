@@ -131,4 +131,33 @@ describe("useJobs", () => {
     await tick(1000);
     expect(api.jobs).toHaveBeenCalledTimes(2);
   });
+
+  it("retries a finished job on the next tick after the refresh fails", async () => {
+    const { result, props } = setup();
+    act(() => result.current.setJobs([{ id: 9, kind: "scan", status: "running" }]));
+    api.jobs.mockResolvedValue([{ id: 9, kind: "scan", status: "done" }]);
+    props.refreshData.mockRejectedValueOnce(new Error("refresh down"));
+    await tick(1000);
+    expect(props.refreshData).toHaveBeenCalledTimes(1);
+    expect(result.current.finished.current.has(9)).toBe(false);
+    expect(props.setError).toHaveBeenCalledWith("Could not refresh jobs: refresh down");
+
+    await tick(1000);
+    expect(props.refreshData).toHaveBeenCalledTimes(2);
+    expect(result.current.finished.current.has(9)).toBe(true);
+
+    const calls = api.jobs.mock.calls.length;
+    await tick(3000); // handled now, so polling stops
+    expect(api.jobs.mock.calls.length).toBe(calls);
+  });
+
+  it("does not set the same error repeatedly", async () => {
+    const { result, props } = setup();
+    act(() => result.current.setJobs([{ id: 10, kind: "scan", status: "running" }]));
+    api.jobs.mockResolvedValue([{ id: 10, kind: "scan", status: "done" }]);
+    props.refreshData.mockRejectedValue(new Error("still down"));
+    await tick(3000);
+    expect(props.refreshData).toHaveBeenCalledTimes(3);
+    expect(props.setError).toHaveBeenCalledTimes(1);
+  });
 });
