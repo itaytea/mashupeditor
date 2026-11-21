@@ -21,6 +21,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from typing import Callable
 from urllib.parse import urlencode
 
 import httpx
@@ -204,7 +205,32 @@ def _retry_delay(value: str | None) -> float:
     return max(0.0, min(delay, RETRY_AFTER_MAX_S))
 
 
-def _get(client: httpx.Client, url: str, params: dict | None = None) -> dict:
+# Longest single sleep while waiting out a 429 with a cancel check attached.
+SLEEP_SLICE_S = 0.5
+
+
+def _sleep(seconds: float, check_cancelled: Callable[[], None] | None = None) -> None:
+    """Sleep, calling check_cancelled (which raises to abort) between short
+    slices so a cancelled job doesn't sit out a long Retry-After. Without a
+    callback this is a plain sleep."""
+    if check_cancelled is None:
+        time.sleep(seconds)
+        return
+    end = time.monotonic() + seconds
+    while True:
+        check_cancelled()
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(SLEEP_SLICE_S, left))
+
+
+def _get(
+    client: httpx.Client,
+    url: str,
+    params: dict | None = None,
+    check_cancelled: Callable[[], None] | None = None,
+) -> dict:
     for attempt in range(MAX_429_RETRIES + 1):
         r = client.get(
             url, params=params, headers={"Authorization": f"Bearer {_access_token(client)}"}
@@ -213,7 +239,7 @@ def _get(client: httpx.Client, url: str, params: dict | None = None) -> dict:
             break
         if attempt == MAX_429_RETRIES:
             raise SpotifyError("Spotify is rate limiting requests (429); try again in a minute")
-        time.sleep(_retry_delay(r.headers.get("Retry-After")))
+        _sleep(_retry_delay(r.headers.get("Retry-After")), check_cancelled)
     if r.status_code == 401:
         raise SpotifyError("Spotify rejected the login; click Connect Spotify again")
     if r.status_code == 403:
@@ -245,16 +271,19 @@ def _parse_item(item: dict) -> dict | None:
     }
 
 
-def fetch_playlist(url_or_id: str) -> dict:
-    """Return {id, name, tracks: [{spotify_id, title, artists, duration_ms}]}."""
+def fetch_playlist(
+    url_or_id: str, check_cancelled: Callable[[], None] | None = None
+) -> dict:
+    """Return {id, name, tracks: [{spotify_id, title, artists, duration_ms}]}.
+    Job workers pass check_cancelled so a rate-limit wait can be interrupted."""
     pl_id = parse_playlist_id(url_or_id)
     with httpx.Client(timeout=20) as client:
-        meta = _get(client, f"{API}/playlists/{pl_id}", {"fields": "name"})
+        meta = _get(client, f"{API}/playlists/{pl_id}", {"fields": "name"}, check_cancelled)
         tracks: list[dict] = []
         url: str | None = f"{API}/playlists/{pl_id}/items"
         params: dict | None = {"limit": 50, "additional_types": "track"}
         while url:
-            page = _get(client, url, params)
+            page = _get(client, url, params, check_cancelled)
             tracks.extend(t for t in map(_parse_item, page.get("items", [])) if t)
             url, params = page.get("next"), None  # `next` already has the query
     return {"id": pl_id, "name": meta.get("name", pl_id), "tracks": tracks}
