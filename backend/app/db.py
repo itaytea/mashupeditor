@@ -95,6 +95,37 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 _conn: sqlite3.Connection | None = None
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(r["name"] == column for r in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _m1_add_version_and_cancel(conn: sqlite3.Connection) -> None:
+    # Idempotent: fresh databases and databases upgraded by the old ad-hoc
+    # checks already have these columns.
+    if not _has_column(conn, "tracks", "version"):  # from before analysis versioning
+        conn.execute("ALTER TABLE tracks ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+    if not _has_column(conn, "jobs", "cancel"):  # from before cancellation existed
+        conn.execute("ALTER TABLE jobs ADD COLUMN cancel INTEGER NOT NULL DEFAULT 0")
+
+
+# Ordered; append new migrations, never reorder or edit shipped ones.
+# PRAGMA user_version records how many have been applied.
+MIGRATIONS = [_m1_add_version_and_cancel]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    for number, migration in enumerate(MIGRATIONS[current:], start=current + 1):
+        conn.execute("BEGIN")
+        try:
+            migration(conn)
+            conn.execute(f"PRAGMA user_version = {int(number)}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+
 def init(path: Path | None = None, recover_jobs: bool = False) -> None:
     """Open the database and create tables. Only the server should pass
     recover_jobs=True: it marks jobs left running by a previous server process
@@ -103,12 +134,7 @@ def init(path: Path | None = None, recover_jobs: bool = False) -> None:
     config.ensure_dirs()
     _conn = connect(path)
     _conn.executescript(SCHEMA)
-    tcols = {r["name"] for r in _conn.execute("PRAGMA table_info(tracks)")}
-    if "version" not in tcols:  # databases from before analysis versioning
-        _conn.execute("ALTER TABLE tracks ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
-    cols = {r["name"] for r in _conn.execute("PRAGMA table_info(jobs)")}
-    if "cancel" not in cols:  # databases created before cancellation existed
-        _conn.execute("ALTER TABLE jobs ADD COLUMN cancel INTEGER NOT NULL DEFAULT 0")
+    _migrate(_conn)
     if recover_jobs:
         # Jobs that were running when the server stopped will never finish.
         _conn.execute(
