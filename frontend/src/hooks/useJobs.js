@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, draftUrl } from "../api.js";
 
 export const ACTIVE = new Set(["queued", "running"]);
@@ -11,9 +11,18 @@ export function useJobs({ refreshData, load, autoPlay, setCurrentDraft, setError
   const [jobs, setJobs] = useState([]);
   const finished = useRef(new Set());
   const inFlight = useRef(false);
+  const lastError = useRef(null);
+  // True after a failed post-finish refresh, so polling keeps going to retry.
+  const [retrying, setRetrying] = useState(false);
+
+  const reportError = useCallback((msg) => {
+    if (msg === lastError.current) return; // don't re-set the same message every tick
+    lastError.current = msg;
+    setError(msg);
+  }, [setError]);
 
   // Poll jobs while any are active; refresh data when one finishes.
-  const anyActive = jobs.some((j) => ACTIVE.has(j.status));
+  const anyActive = jobs.some((j) => ACTIVE.has(j.status)) || retrying;
   useEffect(() => {
     if (!anyActive) return;
     let ticks = 0;
@@ -29,8 +38,11 @@ export function useJobs({ refreshData, load, autoPlay, setCurrentDraft, setError
           }
           const newlyDone = js.filter((j) => !ACTIVE.has(j.status) && !finished.current.has(j.id));
           if (newlyDone.length) {
-            newlyDone.forEach((j) => finished.current.add(j.id));
+            // Only mark these handled once the refresh worked; if it throws they
+            // are picked up again on the next tick.
             const dr = await refreshData();
+            newlyDone.forEach((j) => finished.current.add(j.id));
+            setRetrying(false);
             const done = newlyDone.find((j) => j.kind === "draft" && j.status === "done");
             if (done) {
               const d = dr.find((x) => x.draft_id === done.result.draft_id);
@@ -38,16 +50,18 @@ export function useJobs({ refreshData, load, autoPlay, setCurrentDraft, setError
               if (d) load(draftUrl(d.draft_id, d.mp3 || d.wav), autoPlay);
             }
             const failed = newlyDone.find((j) => j.status === "failed");
-            if (failed) setError(`${failed.params.title ?? failed.kind}: ${failed.error}`);
+            if (failed) reportError(`${failed.params.title ?? failed.kind}: ${failed.error}`);
           }
+          lastError.current = null;
       } catch (e) {
-        setError(`Could not refresh jobs: ${e?.message ?? e}`);
+        setRetrying(true);
+        reportError(`Could not refresh jobs: ${e?.message ?? e}`);
       } finally {
         inFlight.current = false;
       }
     }, 1000);
     return () => clearInterval(timer);
-  }, [anyActive, refreshData, load, autoPlay, setCurrentDraft, setError]);
+  }, [anyActive, refreshData, load, autoPlay, setCurrentDraft, reportError]);
 
   return { jobs, setJobs, finished };
 }
