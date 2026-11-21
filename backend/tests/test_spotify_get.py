@@ -67,3 +67,37 @@ def test_retries_exhausted_raises(sleeps):
         spotify._get(client, "https://api.test/x")
     assert len(seen) == 4  # first try + 3 retries
     assert sleeps == [1, 1, 1]
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def test_cancel_interrupts_429_wait(monkeypatch):
+    """A raising cancel callback stops a long Retry-After wait quickly."""
+    import time
+
+    monkeypatch.setattr(config, "SPOTIFY_ACCESS_TOKEN", "tok")
+    monkeypatch.setattr(spotify, "RETRY_AFTER_MAX_S", 600.0)
+    monkeypatch.setattr(spotify, "SLEEP_SLICE_S", 0.01)
+    client, seen = _client([(429, {"Retry-After": "300"}), (200, {})])
+    start = time.monotonic()
+    calls = []
+
+    def check():
+        calls.append(1)
+        if len(calls) > 3:
+            raise _Cancelled
+
+    with pytest.raises(_Cancelled):
+        spotify._get(client, "https://api.test/x", check_cancelled=check)
+    assert time.monotonic() - start < 5
+    assert len(seen) == 1  # never retried after the cancel
+
+
+def test_cancel_callback_not_raising_still_retries(monkeypatch):
+    monkeypatch.setattr(config, "SPOTIFY_ACCESS_TOKEN", "tok")
+    monkeypatch.setattr(spotify, "SLEEP_SLICE_S", 0.01)
+    client, seen = _client([(429, {"Retry-After": "0"}), (200, {})])
+    assert spotify._get(client, "https://api.test/x", check_cancelled=lambda: None) == {"ok": True}
+    assert len(seen) == 2
