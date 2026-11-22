@@ -19,6 +19,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import (analysis, config, db, fuzzy, jobs, matching, render, settings, songlookup,
                spotify, watcher)
+from .origin_check import OriginCheckMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 # httpx logs every request URL at INFO, which would print API keys.
@@ -67,6 +68,7 @@ ALLOWED_HOSTS = [
     if h.strip()
 ]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+app.add_middleware(OriginCheckMiddleware)  # 403 on cross-site POST/DELETE/...
 
 
 # --- helpers ----------------------------------------------------------------
