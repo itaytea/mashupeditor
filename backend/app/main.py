@@ -17,10 +17,9 @@ from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .origin_check import OriginCheckMiddleware
-
 from . import (analysis, config, db, fuzzy, jobs, matching, render, settings, songlookup,
                spotify, watcher)
+from .origin_check import OriginCheckMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 # httpx logs every request URL at INFO, which would print API keys.
