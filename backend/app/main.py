@@ -17,6 +17,8 @@ from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .origin_check import OriginCheckMiddleware
+
 from . import (analysis, config, db, fuzzy, jobs, matching, render, settings, songlookup,
                spotify, watcher)
 
@@ -67,6 +69,7 @@ ALLOWED_HOSTS = [
     if h.strip()
 ]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+app.add_middleware(OriginCheckMiddleware)  # 403 on cross-site POST/DELETE/...
 
 
 # --- helpers ----------------------------------------------------------------
