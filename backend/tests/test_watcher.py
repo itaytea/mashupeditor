@@ -26,7 +26,7 @@ def _make(monkeypatch, tmp_path, jobs, playlist_id="p1"):
     return w, started, state
 
 
-def test_backoff_after_failure_and_reset_on_success(monkeypatch, tmp_path):
+def test_backoff_after_failure_and_reset_on_success(monkeypatch, tmp_path, temp_db):
     jobs = {"job1": {"status": "failed"}, "job2": {"status": "done"}}
     w, started, _ = _make(monkeypatch, tmp_path, jobs)
     now = [1000.0]
@@ -39,7 +39,7 @@ def test_backoff_after_failure_and_reset_on_success(monkeypatch, tmp_path):
     assert w._failures == 0 and w._retry_at == 0.0
 
 
-def test_backoff_doubles_and_caps(monkeypatch, tmp_path):
+def test_backoff_doubles_and_caps(monkeypatch, tmp_path, temp_db):
     w, _, _ = _make(monkeypatch, tmp_path, {})
     now = [0.0]
     monkeypatch.setattr(watcher.time, "monotonic", lambda: now[0])
@@ -50,7 +50,7 @@ def test_backoff_doubles_and_caps(monkeypatch, tmp_path):
     assert w._retry_at == watcher.BACKOFF_MAX
 
 
-def test_playlist_change_resets_state(monkeypatch, tmp_path):
+def test_playlist_change_resets_state(monkeypatch, tmp_path, temp_db):
     jobs = {"job1": {"status": "failed"}}
     w, started, state = _make(monkeypatch, tmp_path, jobs)
     w.tick()
@@ -60,3 +60,19 @@ def test_playlist_change_resets_state(monkeypatch, tmp_path):
     state["pl"] = "p2"
     assert w.tick() == "job2"
     assert w._checked == {} and w._failures == 0
+
+
+def test_reloaded_watcher_skips_checked_paths(monkeypatch, tmp_path, temp_db):
+    w, started, _ = _make(monkeypatch, tmp_path, {})
+    assert w.tick() == "job1"
+    w.mark_checked([str(tmp_path / "a.mp3")])
+    assert w.tick() is None
+
+    # Simulate a restart: a brand-new watcher over the same database.
+    w2 = watcher.FolderWatcher(lambda f, files: started.append(files) or "job2")
+    assert w2.tick() is None  # a.mp3 was already checked
+    assert len(started) == 1
+
+    (tmp_path / "b.mp3").write_bytes(b"y")
+    assert w2.tick() == "job2"
+    assert [p.name for p in started[-1]] == ["b.mp3"]
