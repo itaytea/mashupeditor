@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -29,11 +30,19 @@ class FolderWatcher:
         self._thread: threading.Thread | None = None
 
     def mark_checked(self, paths: list[str]) -> None:
+        added: dict[str, float] = {}
         for p in paths:
             try:
-                self._checked[p] = Path(p).stat().st_mtime
+                added[p] = Path(p).stat().st_mtime
             except OSError:
                 pass
+        self._checked.update(added)
+        if added and self._watch_key is not None:
+            db.save_watcher_checked(self._scope(self._watch_key), added)
+
+    @staticmethod
+    def _scope(key: tuple[str, str | None]) -> str:
+        return json.dumps(key)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -58,6 +67,7 @@ class FolderWatcher:
 
     def _reset(self) -> None:
         self._checked.clear()
+        db.clear_watcher_checked()
         self._failures = 0
         self._retry_at = 0.0
         self._last_job = None
@@ -90,6 +100,8 @@ class FolderWatcher:
                 log.info("watch: playlist or folder changed, resetting checked files")
                 self._reset()
             self._watch_key = key
+            # Pick up what a previous run already checked (survives restarts).
+            self._checked = {**db.load_watcher_checked(self._scope(key)), **self._checked}
         self._note_job_result()
         if time.monotonic() < self._retry_at:
             return None

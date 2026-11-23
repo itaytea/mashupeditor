@@ -79,6 +79,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS watcher_checked (
+    scope  TEXT NOT NULL,   -- folder + playlist the watcher was watching
+    path   TEXT NOT NULL,
+    mtime  REAL NOT NULL,
+    PRIMARY KEY (scope, path)
+);
 """
 
 _lock = threading.Lock()
@@ -273,6 +280,28 @@ def save_lookup(rec: dict[str, Any]) -> None:
             f"ON CONFLICT(lookup_key) DO UPDATE SET {updates}",
             [rec[k] for k in cols],
         )
+
+
+# --- folder watcher ---------------------------------------------------------
+
+def load_watcher_checked(scope: str) -> dict[str, float]:
+    with cursor() as c:
+        c.execute("SELECT path, mtime FROM watcher_checked WHERE scope=?", (scope,))
+        return {r["path"]: r["mtime"] for r in c.fetchall()}
+
+
+def save_watcher_checked(scope: str, items: dict[str, float]) -> None:
+    with cursor() as c:
+        c.executemany(
+            "INSERT INTO watcher_checked (scope, path, mtime) VALUES (?, ?, ?) "
+            "ON CONFLICT(scope, path) DO UPDATE SET mtime=excluded.mtime",
+            [(scope, p, m) for p, m in items.items()],
+        )
+
+
+def clear_watcher_checked() -> None:
+    with cursor() as c:
+        c.execute("DELETE FROM watcher_checked")
 
 
 # --- jobs -------------------------------------------------------------------
