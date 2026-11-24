@@ -306,6 +306,15 @@ def test_draft_validation(client, tmp_path):
                                             "duration": 5}).status_code == 422
 
 
+def test_draft_rejects_track_with_zero_bpm(client, tmp_path):
+    a = add_track(tmp_path, "A")
+    silent = add_track(tmp_path, "Silent", bpm=0)
+    assert client.post("/api/drafts", json={"vocals_id": a, "instrumental_id": silent}
+                       ).status_code == 400
+    assert client.post("/api/drafts", json={"vocals_id": silent, "instrumental_id": a}
+                       ).status_code == 400
+
+
 def test_draft_job_with_stubbed_render(client, tmp_path, monkeypatch):
     a = add_track(tmp_path, "A")
     b = add_track(tmp_path, "B")
