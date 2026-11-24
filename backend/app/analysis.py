@@ -177,6 +177,8 @@ def find_audio_files(folder: Path) -> list[Path]:
 
 ProgressFn = Callable[[float, str], None]
 
+_ANALYSIS_COLUMNS = ("duration", "bpm", "key_pc", "mode", "key_name", "camelot", "key_confidence")
+
 
 def analyze_path(path: Path, title: str | None = None, artist: str | None = None) -> str:
     """Analyse one file into the cache. Returns "cached", "analyzed" or "failed"
@@ -204,6 +206,9 @@ def analyze_path(path: Path, title: str | None = None, artist: str | None = None
     except Exception as e:  # keep going; record the failure
         log.warning("analysis failed for %s: %s", path, e)
         rec["error"] = str(e)[:500]
+        # The upsert only updates supplied columns; null the analysis ones so a
+        # failed re-analysis doesn't leave stale values next to the error.
+        rec.update(dict.fromkeys(_ANALYSIS_COLUMNS))
         status = "failed"
     db.upsert_track(rec)
     return status
