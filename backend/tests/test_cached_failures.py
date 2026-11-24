@@ -1,5 +1,6 @@
 """Files whose analysis failed are cached too, so rescans don't retry them."""
 
+import os
 import time
 
 import pytest
@@ -114,3 +115,25 @@ def test_old_success_is_still_a_cache_hit(tmp_db, tmp_path, monkeypatch):
     monkeypatch.setattr(analysis, "analyze_file",
                         lambda p: pytest.fail("success must stay cached"))
     assert analysis.analyze_path(f, "t", "a") == "cached"
+
+
+def test_failed_reanalysis_clears_stale_analysis(tmp_db, tmp_path, monkeypatch):
+    f = _bad_file(tmp_path)
+    good = {"duration": 200.0, "bpm": 128.0, "key_pc": 5, "mode": "minor",
+            "key_name": "F minor", "camelot": "4A", "key_confidence": 0.9}
+    monkeypatch.setattr(analysis, "analyze_file", lambda p: dict(good))
+    assert analysis.analyze_path(f, "t", "a") == "analyzed"
+
+    # File changes on disk, so the cache misses and it is analysed again.
+    st = f.stat()
+    os.utime(f, (st.st_atime, st.st_mtime + 10))
+
+    def boom(path):
+        raise RuntimeError("decode failed")
+
+    monkeypatch.setattr(analysis, "analyze_file", boom)
+    assert analysis.analyze_path(f, "t", "a") == "failed"
+    row = [r for r in db.list_tracks() if r["path"] == str(f)][0]
+    assert row["error"] == "decode failed"
+    for col in good:
+        assert row[col] is None, col
