@@ -195,3 +195,36 @@ def test_cancel_during_429_backoff_stops_lookup_promptly(monkeypatch):
     assert client.http.calls == 1
     assert all(s <= client.SLEEP_SLICE for s in slept)
     assert sum(slept) < 2.0  # nowhere near the 60s Retry-After
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("5", 5.0),
+        (" 7 ", 7.0),
+        ("600", 60.0),  # clamped
+        ("0", 10.0),  # zero falls back to the default
+        (None, 10.0),
+        ("", 10.0),
+        ("soon-ish", 10.0),
+        ("Wed, 99 Foo 2099 99:99:99 GMT", 10.0),
+    ],
+)
+def test_retry_delay_seconds_and_fallbacks(value, expected):
+    from app.songlookup import _retry_delay
+
+    assert _retry_delay(value, 10.0) == expected
+
+
+def test_retry_delay_http_date():
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    from app.songlookup import _retry_delay
+
+    soon = datetime.now(timezone.utc) + timedelta(seconds=30)
+    assert 25 <= _retry_delay(format_datetime(soon, usegmt=True), 10.0) <= 30
+    far = datetime.now(timezone.utc) + timedelta(hours=2)
+    assert _retry_delay(format_datetime(far, usegmt=True), 10.0) == 60.0
+    past = datetime.now(timezone.utc) - timedelta(minutes=5)
+    assert _retry_delay(format_datetime(past, usegmt=True), 10.0) == 10.0

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Callable
 
 import httpx
@@ -22,6 +24,31 @@ MIN_TITLE = 85.0
 MIN_ARTIST = 75.0
 # Re-try tracks that weren't found after this long (new songs get added).
 NOT_FOUND_TTL = 30 * 24 * 3600
+
+RETRY_AFTER_MAX_S = 60.0
+
+
+def _retry_delay(value: str | None, default: float) -> float:
+    """Seconds to wait for a Retry-After header: integer seconds or an HTTP
+    date. Falls back to `default` when missing, zero, or unparseable, and is
+    capped at RETRY_AFTER_MAX_S."""
+    delay = default
+    if value:
+        value = value.strip()
+        try:
+            delay = float(int(value))
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(value)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                delay = (when - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, IndexError):
+                delay = default
+    if delay <= 0:
+        delay = default
+    return min(delay, RETRY_AFTER_MAX_S)
+
 
 _PITCH = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 _KEY_RE = re.compile(r"^\s*([A-Ga-g])\s*([#♯b♭]?)\s*(m|min|minor|maj|major)?\s*$")
@@ -184,7 +211,7 @@ class Client:
                 self._sleep(5 * (attempt + 1))
                 continue
             if r.status_code == 429 or r.status_code >= 500:
-                self._sleep(min(60, int(r.headers.get("Retry-After", 0) or 10 * (attempt + 1))))
+                self._sleep(_retry_delay(r.headers.get("Retry-After"), 10.0 * (attempt + 1)))
                 continue
             if r.status_code in (401, 403):
                 raise SongLookupError(f"GetSongBPM rejected the API key ({r.status_code}): {r.text[:150]}")
