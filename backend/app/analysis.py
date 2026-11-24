@@ -88,7 +88,10 @@ def analyze_signal(y: np.ndarray, sr: int) -> dict:
     import librosa
 
     harmonic, percussive = librosa.effects.hpss(y)
-    bpm = fold_bpm(precise_bpm(percussive, sr))
+    raw_bpm = precise_bpm(percussive, sr)
+    if not np.isfinite(raw_bpm) or raw_bpm <= 0:
+        raise ValueError("no tempo detected (silent or tempo-less audio)")
+    bpm = fold_bpm(raw_bpm)
 
     chroma = librosa.feature.chroma_cqt(y=harmonic, sr=sr)
     key = estimate_key(chroma.mean(axis=1))

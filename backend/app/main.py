@@ -117,7 +117,7 @@ def _track_or_404(track_id: int) -> dict:
     t = db.get_track(track_id)
     if not t:
         raise HTTPException(404, f"track {track_id} not found")
-    if t["error"] or t["bpm"] is None:
+    if t["error"] or not t["bpm"]:
         raise HTTPException(400, f"track {track_id} has no analysis")
     return t
 

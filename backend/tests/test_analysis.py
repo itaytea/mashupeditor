@@ -53,3 +53,18 @@ def test_analyze_signal_tempo_and_key():
     assert res["bpm"] == pytest.approx(96, rel=0.03)
     assert res["key_name"] == "Am"
     assert res["camelot"] == "8A"
+
+
+def test_silent_audio_is_analysis_failure():
+    with pytest.raises(ValueError, match="no tempo"):
+        analyze_signal(np.zeros(SR * 10, dtype=np.float32), SR)
+
+
+def test_nonpositive_or_nan_bpm_is_analysis_failure(monkeypatch):
+    from app import analysis
+
+    y = np.zeros(SR * 10, dtype=np.float32)
+    for bad in (0.0, -1.0, float("nan")):
+        monkeypatch.setattr(analysis, "precise_bpm", lambda p, sr, bad=bad: bad)
+        with pytest.raises(ValueError):
+            analyze_signal(y, SR)
