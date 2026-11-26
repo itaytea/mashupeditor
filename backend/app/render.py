@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -247,18 +248,63 @@ def encode_mp3(wav_path: Path, mp3_path: Path) -> Path | None:
     return mp3_path
 
 
-def render_draft(
-    track_a: dict, track_b: dict, *, duration: float = 60.0,
-    semitones: int | None = None, vocal_gain_db: float = 0.0,
-    quantize: str = "auto", progress: ProgressFn | None = None,
-) -> dict:
-    """Vocals of `track_a` over the instrumental of `track_b`.
+@dataclass
+class _Draft:
+    """Mutable state handed from one render_draft stage to the next."""
 
-    `quantize`: "auto" warps A beat-by-beat onto B's grid when a constant
-    stretch leaves the beats loose; "on" always does; "off" never does."""
+    track_a: dict
+    track_b: dict
+    duration: float
+    semitones: int | None
+    vocal_gain_db: float
+    quantize: str
+    report: ProgressFn
+    sr: int = 44100
+    stems_a: dict | None = None
+    stems_b: dict | None = None
+    vox_a: np.ndarray | None = None
+    inst_a: np.ndarray | None = None
+    inst_b: np.ndarray | None = None
+    total_a: float = 0.0
+    total_b: float = 0.0
+    inst_a22: np.ndarray | None = None
+    vox_a22: np.ndarray | None = None
+    inst_b22: np.ndarray | None = None
+    level_a: float = 0.0
+    level_b: float = 0.0
+    struct_a: dict | None = None
+    struct_b: dict | None = None
+    beats_a: np.ndarray | None = None
+    beats_b: np.ndarray | None = None
+    win_b: dict | None = None
+    start_b: float = 0.0
+    levels_b: list | None = None
+    env_b: np.ndarray | None = None
+    bpm_b: float = 0.0
+    pad_s: float = 2.0  # extra source audio so alignment shifts never run dry
+    lock: dict | None = None
+    rate: float = 1.0
+    start_a: float = 0.0
+    bpm_a: float = 0.0
+    ratio: float = 1.0
+    key_source: str = "manual"
+    a0: int = 0
+    a1: int = 0
+    lead_in: float = 0.0
+    vox: np.ndarray | None = None
+    inst_a_st: np.ndarray | None = None
+    n_out: int = 0
+    bed: np.ndarray | None = None
+    fine: float = 0.0
+    offset: int = 0
+    bed22: np.ndarray | None = None
+    check: dict | None = None
+    quantized: bool = False
+    check_constant: dict | None = None
+
+
+def _check_lengths(track_a: dict, track_b: dict) -> None:
     import soundfile as sf
-
-    report = progress or (lambda f, m: None)
 
     for track in (track_a, track_b):
         length = track.get("duration")
@@ -267,57 +313,73 @@ def render_draft(
         if length > MAX_TRACK_SECONDS:
             raise ValueError(f"Track too long for draft (>15 min): {track.get('title') or track['path']}")
 
-    # 1. stems (the bulk of the time on first run; cached afterwards)
-    stems_a = stems.separate(track_a, lambda f, m: report(0.45 * f, f"A: {m}"))
-    stems_b = stems.separate(track_b, lambda f, m: report(0.45 + 0.35 * f, f"B: {m}"))
+
+def _separate(st: _Draft) -> None:
+    """Stems (the bulk of the time on first run; cached afterwards), loaded as stereo."""
+    report, sr = st.report, st.sr
+    st.stems_a = stems.separate(st.track_a, lambda f, m: report(0.45 * f, f"A: {m}"))
+    st.stems_b = stems.separate(st.track_b, lambda f, m: report(0.45 + 0.35 * f, f"B: {m}"))
 
     report(0.80, "Loading stems")
-    sr = 44100
-    vox_a = load_stereo(stems_a["vocals"], sr)
-    inst_a = load_stereo(stems_a["instrumental"], sr)
-    inst_b = load_stereo(stems_b["instrumental"], sr)
+    st.vox_a = load_stereo(st.stems_a["vocals"], sr)
+    st.inst_a = load_stereo(st.stems_a["instrumental"], sr)
+    st.inst_b = load_stereo(st.stems_b["instrumental"], sr)
 
-    # 2. tempo/key analysis works on mono 22 kHz copies (fast, plenty for beats)
+
+def _analyse(st: _Draft) -> None:
+    """Tempo/key analysis works on mono 22 kHz copies (fast, plenty for beats)."""
+    report, sr = st.report, st.sr
     report(0.82, "Measuring tempo in each section")
-    total_a, total_b = inst_a.shape[1] / sr, inst_b.shape[1] / sr
-    duration = min(duration, total_b)
-    inst_a22, vox_a22, inst_b22 = to_mono22(inst_a, sr), to_mono22(vox_a, sr), to_mono22(inst_b, sr)
+    st.total_a, st.total_b = st.inst_a.shape[1] / sr, st.inst_b.shape[1] / sr
+    st.duration = min(st.duration, st.total_b)
+    st.inst_a22 = to_mono22(st.inst_a, sr)
+    st.vox_a22 = to_mono22(st.vox_a, sr)
+    st.inst_b22 = to_mono22(st.inst_b, sr)
     report(0.83, "Finding downbeats and 8-bar phrases")
     # Decide each song's real beat level once (not a 2/3 misread) and use it
     # for the phrase grid, the lock and quantizing alike.
-    level_b = sync.main_level(inst_b22) or track_b["bpm"]
-    level_a = sync.main_level(inst_a22) or track_a["bpm"]
-    struct_b = structure.analyze(inst_b22, level_b)
-    struct_a = structure.analyze(inst_a22, level_a, extra_energy=vox_a22)
-    beats_a = struct_a["beats"] if struct_a["beats"].size else beat_times(inst_a22, TEMPO_SR, track_a["bpm"])
-    beats_b = struct_b["beats"] if struct_b["beats"].size else beat_times(inst_b22, TEMPO_SR, track_b["bpm"])
+    st.level_b = sync.main_level(st.inst_b22) or st.track_b["bpm"]
+    st.level_a = sync.main_level(st.inst_a22) or st.track_a["bpm"]
+    st.struct_b = structure.analyze(st.inst_b22, st.level_b)
+    st.struct_a = structure.analyze(st.inst_a22, st.level_a, extra_energy=st.vox_a22)
+    st.beats_a = (st.struct_a["beats"] if st.struct_a["beats"].size
+                  else beat_times(st.inst_a22, TEMPO_SR, st.track_a["bpm"]))
+    st.beats_b = (st.struct_b["beats"] if st.struct_b["beats"].size
+                  else beat_times(st.inst_b22, TEMPO_SR, st.track_b["bpm"]))
 
-    # B is the reference: whole phrases, ideally with a build/drop, starting on
-    # a phrase boundary. Falls back to the steadiest loud section.
-    win_b = choose_phrase_window(struct_b, duration, total_b)
-    if win_b:
-        start_b, duration = win_b["start"], min(win_b["duration"], total_b - win_b["start"])
+
+def _choose_window(st: _Draft) -> None:
+    """B is the reference: whole phrases, ideally with a build/drop, starting on
+    a phrase boundary. Falls back to the steadiest loud section."""
+    inst_b22, struct_b, level_b = st.inst_b22, st.struct_b, st.level_b
+    st.win_b = choose_phrase_window(struct_b, st.duration, st.total_b)
+    if st.win_b:
+        st.start_b = st.win_b["start"]
+        st.duration = min(st.win_b["duration"], st.total_b - st.win_b["start"])
     else:
-        start_b = choose_section(inst_b22, inst_b22, beats_b, duration, None, keep=8)["anchor"]
-    b0f = int(start_b * TEMPO_SR)
-    env_b = sync.onset_env(inst_b22[b0f:b0f + int(duration * TEMPO_SR)])
-    levels_b = sync.tempo_levels(sync.full_band_env(inst_b22[b0f:b0f + int(duration * TEMPO_SR)]))
+        st.start_b = choose_section(inst_b22, inst_b22, st.beats_b, st.duration, None, keep=8)["anchor"]
+    b0f = int(st.start_b * TEMPO_SR)
+    st.env_b = sync.onset_env(inst_b22[b0f:b0f + int(st.duration * TEMPO_SR)])
+    st.levels_b = sync.tempo_levels(sync.full_band_env(inst_b22[b0f:b0f + int(st.duration * TEMPO_SR)]))
     # B's beat in this window: its main level, refined by the section's own peaks.
-    bpm_b = min(levels_b, key=lambda lv: abs(lv / level_b - 1)) if levels_b else level_b
-    if abs(bpm_b / level_b - 1) > 0.04:
-        bpm_b = struct_b["bpm"] or level_b
+    levels_b = st.levels_b
+    st.bpm_b = min(levels_b, key=lambda lv: abs(lv / level_b - 1)) if levels_b else level_b
+    if abs(st.bpm_b / level_b - 1) > 0.04:
+        st.bpm_b = struct_b["bpm"] or level_b
 
-    # A: try its vocal-heavy sections and keep the one whose drums actually
-    # lock onto B's once stretched (measured, not guessed from BPM numbers).
-    report(0.84, "Locking A's rhythm onto B")
-    pad_s = 2.0  # extra source audio so alignment shifts never run dry
-    src_len = duration * sync.MAX_RATE + 1.0
+
+def _lock(st: _Draft) -> None:
+    """A: try its vocal-heavy sections and keep the one whose drums actually
+    lock onto B's once stretched (measured, not guessed from BPM numbers)."""
+    track_a, struct_a, inst_a22, total_a, pad_s = st.track_a, st.struct_a, st.inst_a22, st.total_a, st.pad_s
+    st.report(0.84, "Locking A's rhythm onto B")
+    src_len = st.duration * sync.MAX_RATE + 1.0
     # Candidates start on A's phrase boundaries (so A's phrase lines up with
     # B's); without a phrase grid, fall back to bar-aligned loud spots.
     cands = phrase_candidates(struct_a, min(src_len, total_a - 2 * pad_s), total_a, pad_s)
     if not cands:
-        energy_a, edt = rms_curve(vox_a22, TEMPO_SR)
-        cands = _candidates(beats_a, energy_a, edt, min(src_len, total_a - 2 * pad_s),
+        energy_a, edt = rms_curve(st.vox_a22, TEMPO_SR)
+        cands = _candidates(st.beats_a, energy_a, edt, min(src_len, total_a - 2 * pad_s),
                             total_a, pad_s, keep=10)
     top_e = max((e for _, e in cands), default=0.0) or 1.0
     lock = None
@@ -325,7 +387,7 @@ def render_draft(
         a0f = int(start * TEMPO_SR)
         env_a = sync.onset_env(inst_a22[a0f:a0f + int(src_len * TEMPO_SR)])
         levels_a = sync.tempo_levels(sync.full_band_env(inst_a22[a0f:a0f + int(src_len * TEMPO_SR)]))
-        res = sync.best_rate(env_a, env_b, levels_a, levels_b, bpm_b)
+        res = sync.best_rate(env_a, st.env_b, levels_a, st.levels_b, st.bpm_b)
         if res is None:
             continue
         res["start"], res["energy"] = start, e
@@ -336,67 +398,85 @@ def render_draft(
         if lock is None or res["pick"] > lock["pick"]:
             lock = res
     if lock is None:  # nothing measurable: fall back to the BPM numbers
-        tempo = score_tempos(track_a["bpm"], track_b["bpm"])
+        tempo = score_tempos(track_a["bpm"], st.track_b["bpm"])
         lock = {"rate": tempo.stretch, "lag": 0.0, "start": cands[0][0], "consistency": 0.0}
-    rate = lock["rate"]  # >1 speeds A up
-    start_a = lock["start"]
-    bpm_a = bpm_b / rate  # A's own tempo at the beat level that matches B
-    ratio = min((1.0, 2.0, 0.5), key=lambda r: abs(bpm_a / (track_a["bpm"] * r) - 1))
-    duration = min(duration, (total_a - start_a - pad_s) / rate)
+    st.lock = lock
+    st.rate = lock["rate"]  # >1 speeds A up
+    st.start_a = lock["start"]
+    st.bpm_a = st.bpm_b / st.rate  # A's own tempo at the beat level that matches B
+    st.ratio = min((1.0, 2.0, 0.5), key=lambda r: abs(st.bpm_a / (track_a["bpm"] * r) - 1))
+    st.duration = min(st.duration, (total_a - st.start_a - pad_s) / st.rate)
 
-    # Key from the same sections; only trust it when the detector is sure.
-    report(0.85, "Measuring key in each section")
-    key_source = "manual"
+
+def _choose_key(st: _Draft) -> None:
+    """Key from the same sections; only trust it when the detector is sure."""
+    track_a, track_b = st.track_a, st.track_b
+    st.report(0.85, "Measuring key in each section")
+    st.key_source = "manual"
+    semitones = st.semitones
     if semitones is None:
-        src_len = int(duration * rate * TEMPO_SR)
-        a0k = int(start_a * TEMPO_SR)
-        b0k = int(start_b * TEMPO_SR)
-        ka = section_key(inst_a22[a0k:a0k + src_len])
-        kb = section_key(inst_b22[b0k:b0k + int(duration * TEMPO_SR)])
+        src_len = int(st.duration * st.rate * TEMPO_SR)
+        a0k = int(st.start_a * TEMPO_SR)
+        b0k = int(st.start_b * TEMPO_SR)
+        ka = section_key(st.inst_a22[a0k:a0k + src_len])
+        kb = section_key(st.inst_b22[b0k:b0k + int(st.duration * TEMPO_SR)])
         if ka and kb and min(ka[2], kb[2]) >= MIN_KEY_CONFIDENCE:
             semitones = min_shift_to_compatible(ka[0], ka[1], kb[0], kb[1]) or 0
-            key_source = f"sections: {key_name(ka[0], ka[1])} → {key_name(kb[0], kb[1])}"
+            st.key_source = f"sections: {key_name(ka[0], ka[1])} → {key_name(kb[0], kb[1])}"
         elif min(track_a.get("key_confidence") or 0, track_b.get("key_confidence") or 0) >= MIN_KEY_CONFIDENCE:
             semitones = score_keys(track_a["key_pc"], track_a["mode"],
                                    track_b["key_pc"], track_b["mode"]).shift
-            key_source = "whole songs"
+            st.key_source = "whole songs"
         else:
             semitones = 0
-            key_source = "uncertain, left unshifted"
-    semitones = int(max(-MAX_PITCH_SHIFT, min(MAX_PITCH_SHIFT, semitones)))
+            st.key_source = "uncertain, left unshifted"
+    st.semitones = int(max(-MAX_PITCH_SHIFT, min(MAX_PITCH_SHIFT, semitones)))
 
-    # 3. cut and stretch the chosen part of A
-    report(0.87, f"Time-stretching A ×{rate:.4f}"
-                 + (f", pitch {semitones:+d} st" if semitones else ""))
-    src_len_a = duration * rate
-    a0 = int(max(0.0, start_a - pad_s) * sr)
-    a1 = int(min(total_a, start_a + src_len_a + pad_s) * sr)
-    lead_in = (start_a - a0 / sr) / rate  # seconds of pre-roll, post-stretch
-    vox = stretch_and_shift(vox_a[:, a0:a1], sr, rate, semitones)
-    inst_a_st = stretch_and_shift(inst_a[:, a0:a1].mean(0, keepdims=True), sr, rate, 0)
 
-    n_out = int(duration * sr)
-    b0 = int(start_b * sr)
-    bed = inst_b[:, b0:b0 + n_out]
-    if bed.shape[1] < n_out:
-        bed = place(bed, 0, n_out)
+def _stretch(st: _Draft) -> None:
+    """Cut and stretch the chosen part of A; cut B's bed."""
+    sr, rate, semitones = st.sr, st.rate, st.semitones
+    st.report(0.87, f"Time-stretching A ×{rate:.4f}"
+                    + (f", pitch {semitones:+d} st" if semitones else ""))
+    src_len_a = st.duration * rate
+    st.a0 = int(max(0.0, st.start_a - st.pad_s) * sr)
+    st.a1 = int(min(st.total_a, st.start_a + src_len_a + st.pad_s) * sr)
+    st.lead_in = (st.start_a - st.a0 / sr) / rate  # seconds of pre-roll, post-stretch
+    st.vox = stretch_and_shift(st.vox_a[:, st.a0:st.a1], sr, rate, semitones)
+    st.inst_a_st = stretch_and_shift(st.inst_a[:, st.a0:st.a1].mean(0, keepdims=True), sr, rate, 0)
 
-    # 4. place A where the lock search found B's beats, then polish on the
-    # real stretched audio (Rubber Band's output can shift by a few ms).
-    report(0.92, "Aligning beats")
-    coarse = -int(lead_in * sr) + int(lock["lag"] * sync.DT * sr)
-    moving = place(inst_a_st, coarse, n_out)[0]
-    fine = onset_lag(bed.mean(0), moving, sr, 0.04)
-    offset = coarse + int(fine * sr)
-    vox = place(vox, offset, n_out)
+    st.n_out = int(st.duration * sr)
+    b0 = int(st.start_b * sr)
+    st.bed = st.inst_b[:, b0:b0 + st.n_out]
+    if st.bed.shape[1] < st.n_out:
+        st.bed = place(st.bed, 0, st.n_out)
 
-    # 5. independent check on the rendered audio: do A's hits stay on B's?
-    bed22 = to_mono22(bed, sr)
-    check = sync.drift_report(to_mono22(place(inst_a_st, offset, n_out), sr), bed22, bpm_b)
 
-    # 6. quantize: if one constant stretch leaves A's beats loose (live drums,
-    # tempo drift, swing), warp A beat-by-beat onto B's actual beats instead.
-    quantized, check_constant = False, None
+def _align(st: _Draft) -> None:
+    """Place A where the lock search found B's beats, then polish on the real
+    stretched audio (Rubber Band's output can shift by a few ms)."""
+    sr, n_out = st.sr, st.n_out
+    st.report(0.92, "Aligning beats")
+    coarse = -int(st.lead_in * sr) + int(st.lock["lag"] * sync.DT * sr)
+    moving = place(st.inst_a_st, coarse, n_out)[0]
+    st.fine = onset_lag(st.bed.mean(0), moving, sr, 0.04)
+    st.offset = coarse + int(st.fine * sr)
+    st.vox = place(st.vox, st.offset, n_out)
+
+    # independent check on the rendered audio: do A's hits stay on B's?
+    st.bed22 = to_mono22(st.bed, sr)
+    st.check = sync.drift_report(to_mono22(place(st.inst_a_st, st.offset, n_out), sr), st.bed22, st.bpm_b)
+
+
+def _quantize(st: _Draft) -> None:
+    """If one constant stretch leaves A's beats loose (live drums, tempo drift,
+    swing), warp A beat-by-beat onto B's actual beats instead."""
+    sr, n_out, a0, a1 = st.sr, st.n_out, st.a0, st.a1
+    start_a, rate, bpm_a, bpm_b = st.start_a, st.rate, st.bpm_a, st.bpm_b
+    inst_a, inst_a22, vox_a, bed22 = st.inst_a, st.inst_a22, st.vox_a, st.bed22
+    quantize, check, report = st.quantize, st.check, st.report
+
+    st.quantized, st.check_constant = False, None
     loose = check is None or check["wander_ms"] > LOOSE_MS
     if quantize == "on" or (quantize == "auto" and loose):
         if config.has_rubberband():
@@ -431,7 +511,7 @@ def render_draft(
             if free.size > 8 and dst_beats.size > 8:
                 own_rate = float(np.median(np.diff(free)) / np.median(np.diff(dst_beats)))
                 if abs(own_rate / rate - 1) > 0.06 and sync.MIN_RATE <= own_rate <= sync.MAX_RATE:
-                    end = int(min(total_a, start_a + duration * own_rate + pad_s) * sr)
+                    end = int(min(st.total_a, start_a + st.duration * own_rate + st.pad_s) * sr)
                     seg_long = inst_a22[int(seg_start * TEMPO_SR):int(end / sr * TEMPO_SR)]
                     own = seg_start + structure.track_beats(seg_long, 60 / np.median(np.diff(free)))
                     results.append(attempt(own, own_rate, end))
@@ -441,12 +521,19 @@ def render_draft(
                 check_q, tmap, q_off, end = best_q
                 better = check is None or check_q["wander_ms"] < check["wander_ms"]
                 if quantize == "on" or better:
-                    vox = place(quantize_stretch(vox_a[:, a0:end], sr, tmap, semitones), q_off, n_out)
-                    quantized, check_constant, check = True, check, check_q
+                    st.vox = place(quantize_stretch(vox_a[:, a0:end], sr, tmap, st.semitones), q_off, n_out)
+                    st.quantized, st.check_constant, st.check = True, check, check_q
 
-    # 7. mix
-    report(0.95, "Mixing")
-    gain = active_rms(bed) / active_rms(vox) * 10 ** (vocal_gain_db / 20)
+
+def _mix(st: _Draft) -> dict:
+    """Balance levels, fade, export WAV + MP3 and describe the result."""
+    import soundfile as sf
+
+    sr, n_out, bed, vox = st.sr, st.n_out, st.bed, st.vox
+    track_a, track_b, rate, start_a, start_b = st.track_a, st.track_b, st.rate, st.start_a, st.start_b
+    duration, win_b = st.duration, st.win_b
+    st.report(0.95, "Mixing")
+    gain = active_rms(bed) / active_rms(vox) * 10 ** (st.vocal_gain_db / 20)
     gain = float(min(gain, 8.0))  # don't blow up near-silent vocal stems
     mix = bed * 0.85 + vox * gain * 0.85
     mix = fade(mix, sr, 0.3, 2.0)
@@ -462,7 +549,7 @@ def render_draft(
 
     mp3_path = None
     if config.has_ffmpeg():
-        report(0.98, "Encoding MP3")
+        st.report(0.98, "Encoding MP3")
         mp3_path = encode_mp3(wav_path, out_dir / "draft.mp3")
 
     return {
@@ -472,22 +559,48 @@ def render_draft(
         "title": f"{track_a['title']} (vocals) × {track_b['title']} (instrumental)",
         "duration": round(n_out / sr, 2),
         "stretch": round(rate, 4),
-        "tempo_ratio": ratio,
-        "semitones": semitones,
+        "tempo_ratio": st.ratio,
+        "semitones": st.semitones,
         "start_a": round(start_a, 2),
         "start_b": round(start_b, 2),
-        "align_fine_ms": round(fine * 1000, 1),
-        "bpm_a_section": round(bpm_a, 2),
-        "bpm_b_section": round(bpm_b, 2),
-        "lock": round(lock.get("consistency", 0.0), 3),
-        "sync": check,  # {offset_ms, wander_ms, lock, corr} on the final audio
-        "quantized": quantized,
-        "sync_unquantized": check_constant,
+        "align_fine_ms": round(st.fine * 1000, 1),
+        "bpm_a_section": round(st.bpm_a, 2),
+        "bpm_b_section": round(st.bpm_b, 2),
+        "lock": round(st.lock.get("consistency", 0.0), 3),
+        "sync": st.check,  # {offset_ms, wander_ms, lock, corr} on the final audio
+        "quantized": st.quantized,
+        "sync_unquantized": st.check_constant,
         "phrases": win_b["phrases"] if win_b else None,
-        "b_sections": labels_between(struct_b, start_b, start_b + duration),
-        "a_sections": labels_between(struct_a, start_a, start_a + duration * rate),
-        "key_source": key_source,
+        "b_sections": labels_between(st.struct_b, start_b, start_b + duration),
+        "a_sections": labels_between(st.struct_a, start_a, start_a + duration * rate),
+        "key_source": st.key_source,
         "engine": "rubberband" if config.has_rubberband() else "librosa",
         "wav": wav_path.name,
         "mp3": mp3_path.name if mp3_path else None,
     }
+
+
+def render_draft(
+    track_a: dict, track_b: dict, *, duration: float = 60.0,
+    semitones: int | None = None, vocal_gain_db: float = 0.0,
+    quantize: str = "auto", progress: ProgressFn | None = None,
+) -> dict:
+    """Vocals of `track_a` over the instrumental of `track_b`.
+
+    `quantize`: "auto" warps A beat-by-beat onto B's grid when a constant
+    stretch leaves the beats loose; "on" always does; "off" never does."""
+    _check_lengths(track_a, track_b)
+    st = _Draft(
+        track_a=track_a, track_b=track_b, duration=duration, semitones=semitones,
+        vocal_gain_db=vocal_gain_db, quantize=quantize,
+        report=progress or (lambda f, m: None),
+    )
+    _separate(st)
+    _analyse(st)
+    _choose_window(st)
+    _lock(st)
+    _choose_key(st)
+    _stretch(st)
+    _align(st)
+    _quantize(st)
+    return _mix(st)
