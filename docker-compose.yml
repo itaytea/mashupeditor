@@ -1,0 +1,45 @@
+# Mashup Maker in Docker (CPU only).
+#
+# Usage:
+#   1. Optional: copy backend/.env.example to backend/.env and fill in Spotify /
+#      GetSongBPM keys. It is loaded if present; MASHUP_DATA_DIR is set by this file.
+#   2. MUSIC_HOST_DIR=/path/to/your/music docker compose up --build
+#      (or put MUSIC_HOST_DIR=... in a .env file next to this one).
+#   3. Open http://127.0.0.1:8080
+#
+# Notes:
+#   - Your music folder is mounted read-only at /music (MUSIC_DIR is set to it).
+#   - Stems, drafts and the database live in the named volume "mashup-data".
+#   - The UI is published on 127.0.0.1 only. Set FRONTEND_URL in backend/.env if
+#     you use the Spotify login, and register the redirect URI in Spotify's dashboard.
+#   - nginx sends "Host: localhost" to the backend so its TrustedHost check passes.
+#   - Demucs on CPU is slow; the first render also downloads the model weights.
+
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      MASHUP_DATA_DIR: /data
+      MUSIC_DIR: /music
+      FRONTEND_URL: http://127.0.0.1:8080/
+    volumes:
+      - mashup-data:/data
+      - type: bind
+        source: ${MUSIC_HOST_DIR:?set MUSIC_HOST_DIR to your music folder}
+        target: /music
+        read_only: true
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:8080:80"
+    restart: unless-stopped
+
+volumes:
+  mashup-data:
