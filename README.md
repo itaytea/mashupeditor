@@ -239,6 +239,23 @@ Results on a 2-core CPU (seconds, lower is better):
 Thresholds and scoring are unchanged. The assignment is now optimal rather than
 greedy, so on this data it finds slightly more matches (e.g. 973 vs 940 of 1000).
 
+### Benchmarks
+
+Both scripts run on synthetic data from `backend/`:
+
+```bash
+.venv/bin/python -m scripts.bench_match_playlist 200 1000
+.venv/bin/python -m scripts.bench_rank_pairs 200 1000
+.venv/bin/python -m scripts.bench_rank_pairs --drift 200
+```
+
+`bench_rank_pairs` times `matching.rank_pairs` against `rank_pairs_bruteforce`
+for each library size and checks that the top 20 scores agree (it exits non-zero
+if they don't). With `--drift` it also prints `sync.drift_report` for a drifting
+click track before and after `render.quantize_stretch`; that part needs librosa,
+pyrubberband and the `rubberband` binary, and is skipped with a note if any is
+missing.
+
 ## Limitations
 
 * Drafts are rough. The tempo is assumed constant, downbeats are approximated as
